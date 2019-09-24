@@ -280,7 +280,9 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
   quiclysrc->ctx.event_log.cb = quicly_new_default_event_logger(stderr);
   //_ctx->event_log.mask = UINT64_MAX;
   quiclysrc->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_LOST);
+                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_RECEIVE) |
+                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_RECEIVE) |
+                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_LOST);
                          //((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_ACKED);
 
   quiclysrc->conn = NULL;
@@ -746,13 +748,13 @@ gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
   quiclysrc->ivec.buffer = info.data;
   quiclysrc->ivec.size = info.size;
   do {
-    if (!g_socket_condition_wait(quiclysrc->socket, G_IO_IN | G_IO_PRI, quiclysrc->cancellable, &err)) {
+    if (!g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN | G_IO_PRI, 1000000, quiclysrc->cancellable, &err)) {
       if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_BUSY) ||
           g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
         goto stopped;
       } else if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)) {
         g_printerr("Timeout in fill\n");
-        g_clear_error(&err);
+        goto end_stream;
       } else {
         goto error;
       }
@@ -803,6 +805,14 @@ gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
       GST_DEBUG_OBJECT(quiclysrc, "FLUSHIN in fill");
       g_clear_error(&err);
       return GST_FLOW_FLUSHING;
+    }
+  end_stream:
+    {
+      gst_buffer_unmap(buf, &info);
+      g_printerr("End of Stream...\n");
+      GST_DEBUG_OBJECT(quiclysrc, "FLUSHIN in fill");
+      g_clear_error(&err);
+      return GST_FLOW_EOS;
     }
 }
 

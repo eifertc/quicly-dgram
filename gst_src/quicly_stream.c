@@ -1,9 +1,24 @@
 #include <gst/gst.h>
 #include <glib.h>
 #include <stdint.h>
+#include <glib/gstdio.h>
+
+#include <errno.h>
+#include <string.h>
 
 int rtp_packet_num = 0;
 gssize rtp_bytes = 0;
+FILE *fPtr = NULL;
+int prev_seq = 0;
+int packets_lost = 0;
+
+typedef struct {
+    uint8_t ver_p_x_cc;
+    uint8_t m_pt;
+    uint16_t seq_nr;
+    uint32_t timestamp;
+    uint32_t ssrc;
+} rtp_hdr_;
 
 static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
 {
@@ -46,20 +61,13 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
     return TRUE;
 }
 
-typedef struct {
-    uint8_t ver_p_x_cc;
-    uint8_t m_pt;
-    uint16_t seq_nr;
-    uint32_t timestamp;
-    uint32_t ssrc;
-} rtp_hdr_;
-
 static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     GstMapInfo map;
     GstBufferList *buffer_list;
     GstBuffer *buffer;
     guint num_buffers, i;
+    int num_lost = 0;
 
     buffer_list = GST_PAD_PROBE_INFO_BUFFER_LIST(info);
     num_buffers = gst_buffer_list_length(buffer_list);
@@ -67,12 +75,31 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
     for (i = 0; i < num_buffers; ++i) {
         buffer = gst_buffer_list_get(buffer_list, i);
         gst_buffer_map(buffer, &map, GST_MAP_READ);
-        //rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
-        //g_print("RTP FRAME SIZE: %lu. Seq NR: %i\n", map.size, hdr->seq_nr);
+        rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
+
+        if (hdr->seq_nr != prev_seq + 256) {
+            if (hdr->seq_nr < prev_seq) {
+                num_lost += ((65535 - prev_seq) + hdr->seq_nr) / 256; 
+            } else {
+                num_lost += (hdr->seq_nr - prev_seq) / 256;
+            }
+            if (fPtr == NULL) {
+                g_print("Seq NR: %i. Number lost: %i\n", hdr->seq_nr, num_lost);
+            } else {
+                fprintf(fPtr, "%s %i %s %i %s", "Seq nr: ", hdr->seq_nr, "Num lost: ", num_lost, "\n");
+            }
+        }
+        if (hdr->seq_nr + 256 > 65535) {
+            prev_seq = hdr->seq_nr - 65535;
+        } else {
+            prev_seq = hdr->seq_nr;
+        }
+
         rtp_packet_num++;
         rtp_bytes += map.size;
         gst_buffer_unmap(buffer, &map);
     }
+    packets_lost++;
 
     return GST_PAD_PROBE_OK;
 }
@@ -80,12 +107,31 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
 static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     GstMapInfo map;
-    GstBuffer *buffer;;
+    GstBuffer *buffer;
+    int num_lost = 0;
 
     buffer = GST_PAD_PROBE_INFO_BUFFER(info);
     gst_buffer_map(buffer, &map, GST_MAP_READ);
-    //rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
-    //g_print("RTP FRAME SIZE: %lu. Seq NR: %i\n", map.size, hdr->seq_nr);
+    rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
+
+    if (hdr->seq_nr != prev_seq + 256) {
+        if (hdr->seq_nr < prev_seq) {
+            num_lost = ((65535 - prev_seq) + hdr->seq_nr) / 256; 
+        } else {
+            num_lost = (hdr->seq_nr - prev_seq) / 256;
+        }
+        if (fPtr == NULL) {
+            g_print("Seq NR: %i. Number lost: %i\n", hdr->seq_nr, num_lost);
+        } else {
+            fprintf(fPtr, "%s %i %s %i %s", "Seq nr: ", hdr->seq_nr, "Num lost: ", num_lost, "\n");
+        }
+    }
+    if (hdr->seq_nr + 256 > 65535) {
+        prev_seq = hdr->seq_nr - 65535;
+    } else {
+        prev_seq = hdr->seq_nr;
+    }
+
     rtp_packet_num++;
     rtp_bytes += map.size;
     gst_buffer_unmap(buffer, &map);
@@ -112,6 +158,8 @@ static void on_pad_added(GstElement *ele, GstPad *pad, gpointer data)
 
 int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean stream_mode, gboolean debug, GMainLoop *loop)
 {
+    g_print("Starting as server...\n");
+
     GstElement *filesrc, *qtdemux, *rtph264pay, *quiclysink;
     GstElement *pipeline;
     GstBus *bus;
@@ -210,6 +258,8 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
 
 int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMainLoop *loop)
 {
+    g_print("Starting as client...\n");
+
     GstElement *quiclysrc, *rtp, *decodebin, *sink, *jitterbuf;
     GstElement *pipeline;
 
@@ -286,7 +336,7 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
     g_free(str);
 
     if (debug)
-        g_print("Quiclysrc src pad. Packets pushed: %i. Bytes: %lu\n", rtp_packet_num, rtp_bytes);
+        g_print("Quiclysrc src pad. Packets pushed: %i. Packets lost: %i. Bytes: %lu\n", rtp_packet_num, packets_lost, rtp_bytes);
 
     gst_element_set_state (pipeline, GST_STATE_NULL);
 
@@ -304,7 +354,6 @@ int main (int argc, char *argv[])
     loop = g_main_loop_new(NULL, FALSE);
 
     /* Parse command line options */
-    gboolean server = FALSE;
     gchar *host = NULL;
     gint *port = NULL;
     gboolean headless = FALSE;
@@ -316,9 +365,8 @@ int main (int argc, char *argv[])
     gchar *plugins = NULL;
     GOptionContext *ctx;
     GError *err = NULL;
+    gchar *logfile = NULL;
     GOptionEntry entries[] = {
-        {"server", 's', 0, G_OPTION_ARG_NONE, &server,
-         "Start as server", NULL},
         {"file", 'f', 0, G_OPTION_ARG_STRING, &file_path,
          "Server. Video file path", NULL},
         {"cert", 'c', 0, G_OPTION_ARG_STRING, &cert_file,
@@ -335,8 +383,10 @@ int main (int argc, char *argv[])
          "Client. Host to connect to", NULL},
         {"port", 'p', 0, G_OPTION_ARG_INT, &port,
          "Client. Port to connect to", NULL},
-        {"headless", 'l', 0, G_OPTION_ARG_NONE, &headless,
+        {"headless", 's', 0, G_OPTION_ARG_NONE, &headless,
          "Client. Use fakesink", NULL},
+        {"logfile", 'l', 0, G_OPTION_ARG_STRING, &logfile,
+         "Use specified logfile", NULL}, 
         {NULL}
     };
 
@@ -360,8 +410,15 @@ int main (int argc, char *argv[])
     reg = gst_registry_get();
     gst_registry_scan_path(reg, plugins);
 
+    if (logfile != NULL) {
+        fPtr = g_fopen(logfile, "a");
+
+        if (fPtr == NULL)
+            g_printerr("Could not open log file. Err: %s\n", strerror(errno));
+    }
+
     int ret;
-    if (server)
+    if (key_file != NULL)
         ret = run_server(file_path, cert_file, key_file, stream_mode, debug, loop);
     else 
         ret = run_client(host, port, headless, debug, loop);

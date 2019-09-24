@@ -242,8 +242,11 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_DATA_BLOCKED_RECEIVE) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_STREAM_DATA_RECEIVE) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_RECEIVE) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_PTO |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_LOST));
+                         ((uint64_t)1 << QUICLY_EVENT_TYPE_PTO) |
+                         ((uint64_t)1 << QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_SEND) |
+                         ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_SEND) |
+                         ((uint64_t)1 << QUICLY_EVENT_TYPE_TEST) |
+                         ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_LOST);
 
   quiclysink->conn = NULL;
   quiclysink->dgram = NULL;
@@ -478,16 +481,23 @@ gst_quiclysink_stop (GstBaseSink * sink)
   g_print("###################### Quicly Stats ######################\n");
   dump_stats(stdout, quiclysink->conn);
   g_print("###################### Quicly Stats ######################\n");
-  quicly_close(quiclysink->conn, 0, "");
+  int ret;
+  ret = quicly_close(quiclysink->conn, 0, "");
+  g_print("Quicly close returns :%i\n", ret);
+  if (quiclysink->conn == NULL)
+    g_print("conn is already NULL !!!!\n");
+
   GIOCondition con;
   do {
-    if (send_pending(quiclysink) != 0)
+    if (send_pending(quiclysink) != 0) {
+      g_print("In STOP: send_pending failed\n");
       break;
+    }
     if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN)) & G_IO_IN) {
       if (receive_packet(quiclysink) != 0)
         break;
     }
-
+    g_print("IN STOP: runs\n");
   } while ((quiclysink->conn != NULL) && 
          (quicly_get_first_timeout(quiclysink->conn) <= quiclysink->ctx.now->cb(quiclysink->ctx.now)));
 
@@ -731,7 +741,7 @@ static int send_pending(GstQuiclysink *quiclysink)
           pa->free_packet(pa, packets[i]);
         }
       } else {
-        g_printerr("Send returned != 0.\n");
+        g_printerr("Send returned %i.\n", ret);
       }
     /* receive one, we need acks to keep the send window open */
     if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN)) & G_IO_IN) {

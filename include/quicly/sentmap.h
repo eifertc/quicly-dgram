@@ -217,6 +217,9 @@ struct st_quicly_sent_block_t *quicly_sentmap__new_block(quicly_sentmap_t *map);
 int quicly_sentmap__type_packet(struct st_quicly_conn_t *conn, const quicly_sent_packet_t *packet, quicly_sent_t *sent,
                                 quicly_sentmap_event_t event);
 
+//debug
+int quicly_sentmap_debug(quicly_sentmap_iter_t *iter);
+//end debug
 /* inline definitions */
 
 inline void quicly_sentmap_init(quicly_sentmap_t *map)

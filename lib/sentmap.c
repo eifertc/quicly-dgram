@@ -129,6 +129,16 @@ void quicly_sentmap_skip(quicly_sentmap_iter_t *iter)
     } while (iter->p->acked != quicly_sentmap__type_packet);
 }
 
+int quicly_sentmap_debug(quicly_sentmap_iter_t *iter)
+{
+    next_entry(iter);
+    if (iter->p->acked != quicly_sentmap__type_packet) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
 int quicly_sentmap_update(quicly_sentmap_t *map, quicly_sentmap_iter_t *iter, quicly_sentmap_event_t event,
                           struct st_quicly_conn_t *conn)
 {
