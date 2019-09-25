@@ -330,8 +330,6 @@ gst_quiclysink_finalize (GObject * object)
 
   GST_DEBUG_OBJECT (quiclysink, "finalize");
 
-  g_print("Quiclysink. Num Packets send: %lu. Bytes: %lu.\n", quiclysink->num_packets, quiclysink->num_bytes);
-
   /* clean up object here */
 
   /* clean up gst ressources */
@@ -480,24 +478,23 @@ gst_quiclysink_stop (GstBaseSink * sink)
   /* Print stats */
   g_print("###################### Quicly Stats ######################\n");
   dump_stats(stdout, quiclysink->conn);
+  g_print("\nNum Packets send: %lu. Kilobytes send: %lu.\n", 
+          quiclysink->num_packets, quiclysink->num_bytes / 1000);
   g_print("###################### Quicly Stats ######################\n");
-  int ret;
-  ret = quicly_close(quiclysink->conn, 0, "");
-  g_print("Quicly close returns :%i\n", ret);
-  if (quiclysink->conn == NULL)
-    g_print("conn is already NULL !!!!\n");
+  
+  if (quicly_close(quiclysink->conn, 0, "") != 0)
+    g_printerr("Error on close. Unclean shutdown\n");
 
   GIOCondition con;
   do {
     if (send_pending(quiclysink) != 0) {
-      g_print("In STOP: send_pending failed\n");
+      g_print("In STOP: sending connection close packet failed\n");
       break;
     }
     if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN)) & G_IO_IN) {
       if (receive_packet(quiclysink) != 0)
         break;
     }
-    g_print("IN STOP: runs\n");
   } while ((quiclysink->conn != NULL) && 
          (quicly_get_first_timeout(quiclysink->conn) <= quiclysink->ctx.now->cb(quiclysink->ctx.now)));
 
@@ -762,12 +759,11 @@ static int send_pending(GstQuiclysink *quiclysink)
 static void send_caps(GstQuiclysink *quiclysink)
 {
   gchar *cp = gst_caps_to_string(quiclysink->caps);
-  //g_print("CAPS IN SEND: %s\n", cp);
+  GST_DEBUG_OBJECT (quiclysink, "Caps send: %s", cp);
   quicly_stream_t *stream;
   if (quicly_open_stream(quiclysink->conn, &stream, 0) == 0) {
     gchar send[strlen(cp) + 20];
     sprintf(send, "MSG:CAPS;DATA:%s\n", cp);
-    g_print("LEN: %li\n", strlen(send));
     quicly_streambuf_egress_write(stream, send, strlen(send));
     quicly_streambuf_egress_shutdown(stream);
   }
@@ -776,8 +772,8 @@ static void send_caps(GstQuiclysink *quiclysink)
 
 static gboolean gst_quiclysink_set_caps (GstBaseSink *sink, GstCaps *caps)
 {
-  g_print("Caps set: %s.\n", gst_caps_to_string(caps));
   GstQuiclysink *quiclysink = GST_QUICLYSINK (sink);
+  GST_DEBUG_OBJECT (quiclysink, "Caps set: %s", gst_caps_to_string(caps));
   if (quiclysink->caps)
     gst_caps_unref(caps);
   quiclysink->caps = gst_caps_copy (caps);

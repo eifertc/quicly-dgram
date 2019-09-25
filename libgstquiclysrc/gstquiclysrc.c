@@ -512,7 +512,7 @@ gst_quiclysrc_start (GstBaseSrc * src)
     g_printerr("Could not send inital packets.\n");
 
 
-  g_print("START CONNECTING...\n");
+  g_print("Connecting...\n");
   while(quicly_connection_is_ready(quiclysrc->conn) == 0) {
     timeout_at = quiclysrc->conn != NULL ? quicly_get_first_timeout(quiclysrc->conn) : INT64_MAX;
     if (timeout_at != INT64_MAX) {
@@ -635,12 +635,11 @@ gst_quiclysrc_stop (GstBaseSrc * src)
   /* Print stats */
   g_print("###################### Quicly Stats ######################\n");
   dump_stats(stdout, quiclysrc->conn);
+  g_print("\nQuiclysrc. Packets received: %lu. Kilobytes received: %lu\n.", 
+          quiclysrc->num_packets, quiclysrc->num_bytes / 1000);
   g_print("###################### Quicly Stats ######################\n");
   
   gst_quiclysrc_free_cancellable(quiclysrc);
-
-  g_print("Quiclysrc. Packets received: %lu. Bytes: %lu\n.", 
-    quiclysrc->num_packets, quiclysrc->num_bytes);
 
   return TRUE;
 }
@@ -748,7 +747,7 @@ gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
   quiclysrc->ivec.buffer = info.data;
   quiclysrc->ivec.size = info.size;
   do {
-    if (!g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN | G_IO_PRI, 1000000, quiclysrc->cancellable, &err)) {
+    if (!g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN | G_IO_PRI, 6000000, quiclysrc->cancellable, &err)) {
       if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_BUSY) ||
           g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
         goto stopped;
@@ -848,11 +847,9 @@ static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len)
 static void send_caps_event(GstQuiclysrc *quiclysrc)
 {
   GstPad *pad = GST_BASE_SRC_PAD(quiclysrc);
-  //GST_EVENT_CAPS
-  //GstEvent event* = gst_event_new_caps(quiclysrc->caps);
-  g_print("Setting new caps downstream...\n");
+  GST_DEBUG_OBJECT(quiclysrc, "Setting caps downstream.");
   if (!gst_pad_set_caps(pad, quiclysrc->caps))
-    g_printerr("Could not set caps\n");
+    g_printerr("Could not set caps downstream\n");
 }
 
 /*
@@ -884,15 +881,15 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
 
       while (token != NULL) {
         if (found) {
-          //printf("LEN: %li. CAP: %s\n", strlen(token), token);
           cp = gst_structure_from_string(token, NULL);
           _caps = gst_caps_new_full(cp, NULL);
-          g_print("CAPS SET: %s\n", gst_caps_to_string(_caps));
           if (GST_IS_CAPS(_caps)) {
             if (quiclysrc->caps)
               gst_caps_unref(quiclysrc->caps);
             quiclysrc->caps = _caps;
             send_caps_event(quiclysrc);
+            g_print("Caps set from source.\n");
+            GST_DEBUG_OBJECT(quiclysrc, "Caps: %s", gst_caps_to_string(_caps));
           }
           break;
         }

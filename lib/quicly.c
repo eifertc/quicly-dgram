@@ -3144,7 +3144,6 @@ static int do_send(quicly_conn_t *conn, quicly_send_context_t *s)
                  * in fact sends nothing) */
             } else {
                 /* mark something inflight as lost */
-                LOG_CONNECTION_EVENT(conn, QUICLY_EVENT_TYPE_TEST, INT_EVENT_ATTR(LENGTH, 10));
                 if ((ret = mark_packets_as_lost(conn, min_packets_to_send)) != 0)
                     goto Exit;
             }
@@ -3269,7 +3268,6 @@ int quicly_send(quicly_conn_t *conn, quicly_datagram_t **packets, size_t *num_pa
         if (quicly_sentmap_get(&iter)->packet_number == UINT64_MAX)
             return QUICLY_ERROR_FREE_CONNECTION;
         
-        LOG_CONNECTION_EVENT(conn, QUICLY_EVENT_TYPE_TEST, INT_EVENT_ATTR(LENGTH, 0));
         if (conn->super.state == QUICLY_STATE_CLOSING && conn->egress.send_ack_at <= now) {
             destroy_all_streams(conn, 0, 0); /* delayed until the emission of CONNECTION_CLOSE frame to allow quicly_close to be
                                               * called from a stream handler */
@@ -3283,13 +3281,11 @@ int quicly_send(quicly_conn_t *conn, quicly_datagram_t **packets, size_t *num_pa
                 assert(s.current.cipher->aead != NULL);
                 s.current.first_byte = QUICLY_PACKET_TYPE_INITIAL;
             }
-            LOG_CONNECTION_EVENT(conn, QUICLY_EVENT_TYPE_TEST, INT_EVENT_ATTR(LENGTH, 1));
             if ((ret = send_connection_close(conn, &s)) != 0)
                 return ret;
             if ((ret = commit_send_packet(conn, &s, 0)) != 0)
                 return ret;
         }
-        LOG_CONNECTION_EVENT(conn, QUICLY_EVENT_TYPE_TEST, INT_EVENT_ATTR(LENGTH, 2));
         conn->egress.send_ack_at = quicly_sentmap_get(&iter)->sent_at + get_sentmap_expiration_time(conn);
         assert(conn->egress.send_ack_at > now);
         *num_packets = s.num_packets;

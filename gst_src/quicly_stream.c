@@ -26,7 +26,7 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
 
     switch (GST_MESSAGE_TYPE(msg)) {
         case GST_MESSAGE_EOS:
-            g_print("End of stream\n");
+            g_print("End of stream. Stopping playback...\n");
             g_main_loop_quit(loop);
             break;
         case GST_MESSAGE_ERROR: {
@@ -160,7 +160,7 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
 {
     g_print("Starting as server...\n");
 
-    GstElement *filesrc, *qtdemux, *rtph264pay, *quiclysink;
+    GstElement *filesrc, *qtdemux, *rtph264pay, *quiclysink, *rtpmp4gpay;
     GstElement *pipeline;
     GstBus *bus;
     guint bus_watch_id;
@@ -170,6 +170,7 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
     filesrc = gst_element_factory_make("filesrc", "fs");
     qtdemux = gst_element_factory_make("qtdemux", "demux");
     rtph264pay = gst_element_factory_make("rtph264pay", "rtp");
+    //rtpmp4gpay = gst_element_factory_make("rtpmp4gpay", "rtp");
     quiclysink = gst_element_factory_make("quiclysink", "quicly");
 
     if (!pipeline || !filesrc || !qtdemux || !rtph264pay || !quiclysink) {
@@ -195,6 +196,7 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
         g_object_set(G_OBJECT(quiclysink), "stream-mode", TRUE, NULL);
 
     g_object_set(G_OBJECT(rtph264pay), "mtu", 1200, NULL);
+    //g_object_set(G_OBJECT(rtpmp4gpay), "mtu", 1200, NULL);
 
     /* message handler */
     bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
@@ -203,19 +205,27 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
 
     //add elements to pipeline
     gst_bin_add_many (GST_BIN (pipeline), filesrc, qtdemux, rtph264pay, quiclysink, NULL);
+    //gst_bin_add_many (GST_BIN (pipeline), filesrc, rtpmp4gpay, quiclysink, NULL);
 
     // link
     if (!gst_element_link(filesrc, qtdemux))
         g_warning("Failed to link filesrc");
     if (!gst_element_link(rtph264pay, quiclysink))
         g_warning("Failed to link rtp to quiclysink");
-
+    
+    /*
+    if (!gst_element_link(filesrc, rtpmp4gpay))
+        g_warning("Failed to link filesrc");
+    if (!gst_element_link(rtpmp4gpay, quiclysink))
+        g_warning("Failed to link rtp to quiclysink");
+    */
     g_signal_connect(qtdemux, "pad-added", G_CALLBACK(on_pad_added), rtph264pay);
 
     if (debug) {
         /* get rtp source pad */
         GstPad *pad;
         pad = gst_element_get_static_pad(rtph264pay, "src");
+        //pad = gst_element_get_static_pad(rtpmp4gpay, "src");
         gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER_LIST, 
                          (GstPadProbeCallback) cb_inspect_buf_list,
                          NULL, NULL);
@@ -227,20 +237,20 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
     
 
     /* start the pipeline */
-    g_print ("Start...\n");
     gst_element_set_state(GST_ELEMENT (pipeline), GST_STATE_PLAYING);
 
     g_main_loop_run(loop);
 
     /* Out of the main loop, clean up nicely */
-    g_print ("Returned, stopping playback\n");
+    g_print ("Printing stats:\n");
 
-    //stats
+    /* Print stats */
     GstStructure *stats;
     gchar *str;
     g_object_get(rtph264pay, "stats", &stats, NULL);
+    //g_object_get(rtpmp4gpay, "stats", &stats, NULL);
     str = gst_structure_to_string(stats);
-    g_print("stats: %s\n", str);
+    g_print("%s\n", str);
     gst_structure_free(stats);
     g_free(str);
 
@@ -260,7 +270,7 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
 {
     g_print("Starting as client...\n");
 
-    GstElement *quiclysrc, *rtp, *decodebin, *sink, *jitterbuf;
+    GstElement *quiclysrc, *rtp, *decodebin, *sink, *jitterbuf, *rtpmp4gdepay;
     GstElement *pipeline;
 
     GstBus *bus;
@@ -269,6 +279,7 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
     pipeline = gst_pipeline_new("streamer");
     quiclysrc = gst_element_factory_make("quiclysrc", "quicsrc");
     rtp = gst_element_factory_make("rtph264depay", "rtp");
+    //rtpmp4gdepay = gst_element_factory_make("rtpmp4gdepay", "rtp");
     decodebin = gst_element_factory_make("decodebin", "dec");
 
     if (headless) {
@@ -297,11 +308,16 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
     gst_object_unref (bus);
 
     gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, rtp, decodebin, sink, NULL);
+    //gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, rtpmp4gdepay, decodebin, sink, NULL);
 
     // link
     if (!gst_element_link_many(quiclysrc, jitterbuf, rtp, decodebin, NULL))
         g_warning("Failed to link many");
-
+    
+    /*
+    if (!gst_element_link_many(quiclysrc, jitterbuf, rtpmp4gdepay, decodebin, NULL))
+        g_warning("Failed to link many");
+    */
     g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
 
     if (debug) {
@@ -318,20 +334,19 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
     }
 
     /* start the pipeline */
-    g_print ("Start...\n");
     gst_element_set_state(GST_ELEMENT (pipeline), GST_STATE_PLAYING);
 
     g_main_loop_run(loop);
 
     /* Out of the main loop, clean up nicely */
-    g_print ("Returned, stopping playback\n");
+    g_print ("Printing stats:\n");
     
     //stats
     GstStructure *stats;
     gchar *str;
     g_object_get(jitterbuf, "stats", &stats, NULL);
     str = gst_structure_to_string(stats);
-    g_print("stats: %s\n", str);
+    g_print("%s\n", str);
     gst_structure_free(stats);
     g_free(str);
 
