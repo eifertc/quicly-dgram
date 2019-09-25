@@ -2,6 +2,7 @@
 #include <glib.h>
 #include <sys/types.h>
 #include <stdint.h>
+#include <sys/time.h>
 
 GstElement *stats_element;
 
@@ -50,6 +51,17 @@ typedef struct {
     uint32_t ssrc;
 } rtp_hdr_;
 
+inline uint64_t get_time() {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return t.tv_sec * (int)1e6 + t.tv_usec;
+}
+
+uint64_t last_time = 0;
+uint64_t avg_time = 0;
+uint64_t num_buffers = 0;
+uint64_t highest_jit = 0;
+
 static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     GstMapInfo map;
@@ -73,14 +85,27 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
 
 static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
+    /*
     GstMapInfo map;
-    GstBuffer *buffer;;
+    GstBuffer *buffer;
 
     buffer = GST_PAD_PROBE_INFO_BUFFER(info);
     gst_buffer_map(buffer, &map, GST_MAP_READ);
     rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
     g_print("RTP FRAME SIZE (buffer): %lu. Seq NR: %i\n", map.size, hdr->seq_nr);
     gst_buffer_unmap(buffer, &map);
+    */
+    if (last_time != 0) {
+        uint64_t t = get_time();
+        uint64_t dif = t - last_time;
+        avg_time += dif;
+        last_time = t;
+        ++num_buffers;
+        if (dif > highest_jit)
+            highest_jit = dif;
+    } else {
+        last_time = get_time();
+    }
 
     return GST_PAD_PROBE_OK;
 }
@@ -277,6 +302,10 @@ int run_client(gboolean headless, gboolean bunny, gboolean debug, GMainLoop *loo
     g_print("stats: %s\n", str);
     gst_structure_free(stats);
     g_free(str);
+
+    if (debug)
+        g_print("\nAvg time between pushed buffers (in micro seconds): %lu. Highest: %lu\n", 
+                avg_time / num_buffers, highest_jit);
 
     gst_element_set_state (pipeline, GST_STATE_NULL);
 

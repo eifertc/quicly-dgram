@@ -2,9 +2,9 @@
 #include <glib.h>
 #include <stdint.h>
 #include <glib/gstdio.h>
-
 #include <errno.h>
 #include <string.h>
+#include <sys/time.h>
 
 int rtp_packet_num = 0;
 gssize rtp_bytes = 0;
@@ -19,6 +19,17 @@ typedef struct {
     uint32_t timestamp;
     uint32_t ssrc;
 } rtp_hdr_;
+
+uint64_t last_time = 0;
+uint64_t avg_time = 0;
+uint64_t num_buffers = 0;
+uint64_t highest_jit = 0;
+
+inline uint64_t get_time() {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return t.tv_sec * (int)1e6 + t.tv_usec;
+}
 
 static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
 {
@@ -106,6 +117,7 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
 
 static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
+    /*
     GstMapInfo map;
     GstBuffer *buffer;
     int num_lost = 0;
@@ -135,6 +147,19 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
     rtp_packet_num++;
     rtp_bytes += map.size;
     gst_buffer_unmap(buffer, &map);
+    */
+
+    if (last_time != 0) {
+        uint64_t t = get_time();
+        uint64_t dif = t - last_time;
+        avg_time += dif;
+        last_time = t;
+        ++num_buffers;
+        if (dif > highest_jit)
+            highest_jit = dif;
+    } else {
+        last_time = get_time();
+    }
 
     return GST_PAD_PROBE_OK;
 }
@@ -350,8 +375,11 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
     gst_structure_free(stats);
     g_free(str);
 
-    if (debug)
+    if (debug) {
         g_print("Quiclysrc src pad. Packets pushed: %i. Packets lost: %i. Bytes: %lu\n", rtp_packet_num, packets_lost, rtp_bytes);
+        g_print("\nAvg time between pushed buffers (in micro seconds): %lu. Highest: %lu\n", 
+                avg_time / num_buffers, highest_jit);
+    }
 
     gst_element_set_state (pipeline, GST_STATE_NULL);
 
