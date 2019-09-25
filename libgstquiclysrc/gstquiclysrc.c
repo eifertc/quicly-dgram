@@ -282,6 +282,8 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
   quiclysrc->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
                                   ((uint64_t)1 << QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_RECEIVE) |
                                   ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_RECEIVE) |
+                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_DATA_BLOCKED_RECEIVE) |
+                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_SEND) |
                                   ((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_LOST);
                          //((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_ACKED);
 

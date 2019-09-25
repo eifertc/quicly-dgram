@@ -237,11 +237,13 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_CONGESTION) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAMS_BLOCKED_SEND) |
+                         ((uint64_t)1 << QUICLY_EVENT_TYPE_DATA_BLOCKED_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAMS_BLOCKED_RECEIVE) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_DATA_BLOCKED_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_DATA_BLOCKED_RECEIVE) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_STREAM_DATA_RECEIVE) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_RECEIVE) |
+                         ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_PTO) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_SEND) |
