@@ -61,23 +61,27 @@ uint64_t last_time = 0;
 uint64_t avg_time = 0;
 uint64_t num_buffers = 0;
 uint64_t highest_jit = 0;
+int num_packets = 0;
 
 static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
-    GstMapInfo map;
+    //GstMapInfo map;
     GstBufferList *buffer_list;
-    GstBuffer *buffer;
+    //GstBuffer *buffer;
     guint num_buffers, i;
 
     buffer_list = GST_PAD_PROBE_INFO_BUFFER_LIST(info);
     num_buffers = gst_buffer_list_length(buffer_list);
 
     for (i = 0; i < num_buffers; ++i) {
+        /*
         buffer = gst_buffer_list_get(buffer_list, i);
         gst_buffer_map(buffer, &map, GST_MAP_READ);
         rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
         g_print("RTP FRAME SIZE (buffer_list): %lu. Seq NR: %i\n", map.size, hdr->seq_nr);
         gst_buffer_unmap(buffer, &map);
+        */
+        num_packets++;
     }
 
     return GST_PAD_PROBE_OK;
@@ -95,6 +99,7 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
     g_print("RTP FRAME SIZE (buffer): %lu. Seq NR: %i\n", map.size, hdr->seq_nr);
     gst_buffer_unmap(buffer, &map);
     */
+    /*
     if (last_time != 0) {
         uint64_t t = get_time();
         uint64_t dif = t - last_time;
@@ -106,6 +111,8 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
     } else {
         last_time = get_time();
     }
+    */
+    num_packets++;
 
     return GST_PAD_PROBE_OK;
 }
@@ -193,6 +200,13 @@ int run_server(gchar *file_path, gchar *host, gint *port, gboolean debug, GMainL
     /* Out of the main loop, clean up nicely */
     g_print ("Returned, stopping playback\n");
 
+    if (debug)
+        g_print("Packets send: %i\n", num_packets);
+
+    guint64 served;
+    g_object_get(udpsink, "bytes-served", &served, NULL);
+    g_print("Bytes served: %lu\n", served);
+
     gst_element_set_state (pipeline, GST_STATE_NULL);
 
     g_print ("Deleting pipeline\n");
@@ -242,6 +256,7 @@ int run_client(gboolean headless, gboolean bunny, gboolean debug, GMainLoop *loo
     udpsrc = gst_element_factory_make("udpsrc", "fs");
     rtp = gst_element_factory_make("rtph264depay", "rtp");
     decodebin = gst_element_factory_make("decodebin", "dec");
+    //decodebin = gst_element_factory_make("avdec_h264", "dec");
 
     if (headless) {
         sink = gst_element_factory_make("fakesink", "sink");
@@ -257,6 +272,8 @@ int run_client(gboolean headless, gboolean bunny, gboolean debug, GMainLoop *loo
 
     g_object_set(G_OBJECT(udpsrc), "uri", "udp://0.0.0.0:5000",
                  "timeout", 1550000000, "caps", caps, NULL);
+
+    g_object_set(G_OBJECT(jitterbuf), "latency", 600, NULL);
 
     /* message handler */
     bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
@@ -304,8 +321,11 @@ int run_client(gboolean headless, gboolean bunny, gboolean debug, GMainLoop *loo
     g_free(str);
 
     if (debug)
+        g_print("Packets pushed: %i\n", num_packets);
+        /*
         g_print("\nAvg time between pushed buffers (in micro seconds): %lu. Highest: %lu\n", 
                 avg_time / num_buffers, highest_jit);
+                */
 
     gst_element_set_state (pipeline, GST_STATE_NULL);
 
