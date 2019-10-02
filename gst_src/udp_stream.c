@@ -1,8 +1,12 @@
 #include <gst/gst.h>
 #include <glib.h>
+#include <gio/gio.h>
 #include <sys/types.h>
 #include <stdint.h>
 #include <sys/time.h>
+#include <stdio.h>
+
+#include <sys/socket.h>
 
 GstElement *stats_element;
 
@@ -10,6 +14,12 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
 {
     GMainLoop *loop = (GMainLoop *) data;
     const GstStructure *st = gst_message_get_structure (msg);
+    /*
+    const gchar *type, *src;
+    type = GST_MESSAGE_TYPE_NAME(msg);
+    src = GST_MESSAGE_SRC_NAME(msg);
+    g_print("MSG FROM: %s. TYPE: %s\n", src, type);
+    */
 
     switch (GST_MESSAGE_TYPE(msg)) {
         case GST_MESSAGE_EOS:
@@ -62,6 +72,152 @@ uint64_t avg_time = 0;
 uint64_t num_buffers = 0;
 uint64_t highest_jit = 0;
 int num_packets = 0;
+
+struct connection {
+    gchar *host;
+    gint port;
+    GstElement *pipeline;
+};
+
+static void get_static_caps(gboolean bunny, GstCaps **caps)
+{
+    if (bunny) {
+        *caps = gst_caps_new_simple("application/x-rtp",
+                                   "media", G_TYPE_STRING, "video",
+                                   "clock-rate", G_TYPE_INT, 90000,
+                                   "encoding-name", G_TYPE_STRING, "H264",
+                                   "packetization-mode", G_TYPE_STRING, "1",
+                                   "profile-level-id", G_TYPE_STRING, "640033",
+                                   "sprop-parameter-sets", G_TYPE_STRING, "Z2QAM6xyhEB4AiflwEQAAAMABAAAAwDwPGDGEYA\\=\\,aOhDiSyL",
+                                   "payload", G_TYPE_INT, 96,
+                                    NULL);
+    } else {
+        *caps = gst_caps_new_simple("application/x-rtp",
+                                   "media", G_TYPE_STRING, "video",
+                                   "clock-rate", G_TYPE_INT, 90000,
+                                   "encoding-name", G_TYPE_STRING, "H264",
+                                   "packetization-mode", G_TYPE_STRING, "1",
+                                   "profile-level-id", G_TYPE_STRING, "42c01f",
+                                   "sprop-parameter-sets", G_TYPE_STRING, "Z0LAH9kAUAW7/wB4AFsQAAADABAAAAMDAPGDJIA\\=\\,aMuBcsg\\=",
+                                   "payload", G_TYPE_INT, 96,
+                                    NULL);
+    }
+}
+
+static int exchange_caps(gchar *host, gint port, GstCaps **caps)
+{
+    GSocket *sock;
+    GError *err;
+    if ((sock = g_socket_new(G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_STREAM, 0, &err)) == NULL) {
+        g_printerr("Could not create socket\n");
+        g_error_free(err);
+        return -1;
+    }
+    GSocketAddress *addr;
+    GInetAddress *iaddr;
+    iaddr = g_inet_address_new_from_string(host);
+    if (!iaddr) {
+        g_printerr("Could not resolve host address\n");
+        return -1;
+    }
+    addr = g_inet_socket_address_new(iaddr, port + 1);
+
+    if (!g_socket_connect(sock, addr, NULL, &err)) {
+        g_printerr("Could not connect to host\n");
+        g_error_free(err);
+        return -1;
+    }
+    gssize bytes_received;
+    gchar buf[2048];
+    gint off = 0;
+    do {
+        bytes_received = g_socket_receive(sock, buf+off, 2048, NULL, &err);
+        if (bytes_received < 0) {
+            g_printerr("Error on receive caps\n");
+            g_error_free(err);
+            return -1;
+        }
+        off += bytes_received;
+    } while (bytes_received > 0);
+    if (off == 0)
+        return -1;
+
+    gchar str[off];
+    memcpy(str, buf, off);
+    //g_print("STRING COPIED: %s\n", str);
+    
+    char delim[] = "\n";
+    char *ptr = strtok(str, delim);
+    //g_print("DELIM STRING: %s\n", ptr);
+    GstStructure *cp;
+    
+    cp = gst_structure_from_string(ptr, NULL);
+    *caps = gst_caps_new_full(cp, NULL);
+    //g_print("CAPS: %s", gst_caps_to_string(*caps));
+
+    g_socket_close(sock, NULL);
+
+    return 0;
+}
+
+static GstPadProbeReturn cb_get_caps_event(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    GstEvent *event;
+    event = gst_pad_probe_info_get_event(info);
+    //const gchar *event_type;
+    //event_type = GST_EVENT_TYPE_NAME(event);
+    //g_print("EVENT: %s\n", event_type);
+    if (GST_EVENT_TYPE(event) == GST_EVENT_CAPS) {
+        struct connection *con_data = (struct connection *) user_data;
+        gst_element_set_state(GST_ELEMENT (con_data->pipeline), GST_STATE_PAUSED);
+        GstCaps *caps;
+        gst_event_parse_caps(event, &caps);
+        gchar *cp = gst_caps_to_string(caps);
+        gchar *end = "\n";
+        gchar send_str[strlen(cp) + strlen(end)];
+        sprintf(send_str, "%s%s", cp, end);
+        //g_print("Caps to send: %s\n", send_str);
+
+        GError *err;
+        GSocketListener *listen = g_socket_listener_new();
+
+        if (!g_socket_listener_add_inet_port(listen, con_data->port + 1, NULL, &err)) {
+            g_printerr("Could not create Socket\n");
+            g_error_free(err);
+            return GST_PAD_PROBE_REMOVE;
+        }
+
+        GSocket *sock;
+        g_print("Waiting for client to exchange caps...");
+        if ((sock = g_socket_listener_accept_socket(listen, NULL, NULL, &err)) == NULL) {
+            g_printerr("Error accepting connection\n");
+            g_error_free(err);
+            return GST_PAD_PROBE_REMOVE;
+        }
+
+        gsize len = strlen(send_str);
+        gint off = 0;
+        while (len > 0) {
+            gssize ret = g_socket_send(sock, send_str + off, len, NULL, &err);
+            if (ret < 0){
+                g_printerr("Could not send on socket\n");
+                g_error_free(err);
+                return GST_PAD_PROBE_REMOVE;
+            }
+            off += ret;
+            len -= ret;
+        }
+
+        g_socket_close(sock, NULL);
+        g_socket_listener_close(listen);
+        g_print("Done.\n");
+        gst_element_set_state(GST_ELEMENT (con_data->pipeline), GST_STATE_PLAYING);
+        return GST_PAD_PROBE_REMOVE;
+    } 
+
+    
+    return GST_PAD_PROBE_OK;
+}
 
 static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
@@ -134,28 +290,36 @@ static void on_pad_added(GstElement *ele, GstPad *pad, gpointer data)
     gst_object_unref(sinkpad);
 }
 
-int run_server(gchar *file_path, gchar *host, gint *port, gboolean debug, GMainLoop *loop)
+int run_server(gchar *file_path, gchar *host, gint port, gboolean auto_caps, gboolean debug, GMainLoop *loop)
 {
-    GstElement *filesrc, *qtdemux, *rtph264pay, *udpsink;
+    GstElement *filesrc, *demux, *rtph264pay, *udpsink;
     GstElement *pipeline;
     GstBus *bus;
     guint bus_watch_id;
 
-    /* inspect rtp data */
-    //GstPad *pad;
-
     pipeline = gst_pipeline_new("streamer");
     filesrc = gst_element_factory_make("filesrc", "fs");
-    qtdemux = gst_element_factory_make("qtdemux", "demux");
     rtph264pay = gst_element_factory_make("rtph264pay", "rtp");
     udpsink = gst_element_factory_make("udpsink", "udp");
 
-    if (!pipeline || !filesrc || !qtdemux || !rtph264pay || !udpsink) {
+    char comp_str[strlen(file_path)];
+    memcpy(comp_str, file_path, strlen(file_path)); 
+    char *type = "mkv";
+    char delim[] = ".";
+    char *ptr = strtok(comp_str, delim);
+    ptr = strtok(NULL, delim);
+    if (strncmp(ptr, type, 3) == 0) {
+        demux = gst_element_factory_make("matroskademux", "demux");
+    } else {
+        demux = gst_element_factory_make("qtdemux", "demux");
+    }
+
+    if (!pipeline || !filesrc || !demux || !rtph264pay || !udpsink) {
         g_printerr ("One element could not be created. Exiting.\n");
         return -1;
     }
 
-    if (host == NULL || port == NULL || file_path == NULL) {
+    if (host == NULL || file_path == NULL) {
         g_print("Specify video file path, host and port\n");
         return -1;
     }
@@ -169,16 +333,31 @@ int run_server(gchar *file_path, gchar *host, gint *port, gboolean debug, GMainL
     bus_watch_id = gst_bus_add_watch (bus, msg_handler, loop);
     gst_object_unref (bus);
 
-    gst_bin_add_many (GST_BIN (pipeline), filesrc, qtdemux, rtph264pay, udpsink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), filesrc, demux, rtph264pay, udpsink, NULL);
 
-    if (!gst_element_link(filesrc, qtdemux))
+    if (!gst_element_link(filesrc, demux))
         g_warning("Failed to link filesrc");
     if (!gst_element_link(rtph264pay, udpsink))
         g_warning("Failed to link rtp");
 
-    g_signal_connect(qtdemux, "pad-added", G_CALLBACK(on_pad_added), rtph264pay);
+    g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), rtph264pay);
 
-    /* get rtp source pad */
+    if (auto_caps) {
+        /* Get rtp source pad for caps event */
+        struct connection conn;
+        
+        conn.host = host;
+        conn.port = port;
+        conn.pipeline = pipeline;
+        
+        GstPad *spad;
+        spad = gst_element_get_static_pad(rtph264pay, "src");
+
+        gst_pad_add_probe(spad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                          (GstPadProbeCallback) cb_get_caps_event, &conn, NULL);
+    }
+
+    /* get rtp source pad for buffer inspection */
     if (debug) {
         GstPad *pad;
         pad = gst_element_get_static_pad(rtph264pay, "src");
@@ -192,6 +371,7 @@ int run_server(gchar *file_path, gchar *host, gint *port, gboolean debug, GMainL
     }
 
     /* start the pipeline */
+    //gst_element_set_state(GST_ELEMENT (pipeline), GST_STATE_READY);
     g_print ("Start...\n");
     gst_element_set_state(GST_ELEMENT (pipeline), GST_STATE_PLAYING);
 
@@ -216,40 +396,15 @@ int run_server(gchar *file_path, gchar *host, gint *port, gboolean debug, GMainL
     return 0;
 }
 
-int run_client(gboolean headless, gboolean bunny, gboolean debug, GMainLoop *loop)
+int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboolean auto_caps, gboolean debug, GMainLoop *loop)
 {
     GstElement *udpsrc, *rtp, *decodebin, *sink, *jitterbuf;
 
     GstElement *pipeline;
-    GstCaps *caps;
     GstBus *bus;
     guint bus_watch_id;
 
-    if (bunny) {
-        caps = gst_caps_new_simple("application/x-rtp",
-                                   "media", G_TYPE_STRING, "video",
-                                   "clock-rate", G_TYPE_INT, 90000,
-                                   "encoding-name", G_TYPE_STRING, "H264",
-                                   "packetization-mode", G_TYPE_STRING, "1",
-                                   "profile-level-id", G_TYPE_STRING, "640033",
-                                   "sprop-parameter-sets", G_TYPE_STRING, "Z2QAM6xyhEB4AiflwEQAAAMABAAAAwDwPGDGEYA\\=\\,aOhDiSyL",
-                                   "payload", G_TYPE_INT, 96,
-                                    NULL);
-    } else {
-        caps = gst_caps_new_simple("application/x-rtp",
-                                   "media", G_TYPE_STRING, "video",
-                                   "clock-rate", G_TYPE_INT, 90000,
-                                   "encoding-name", G_TYPE_STRING, "H264",
-                                   "packetization-mode", G_TYPE_STRING, "1",
-                                   "profile-level-id", G_TYPE_STRING, "42c01f",
-                                   "sprop-parameter-sets", G_TYPE_STRING, "Z0LAH9kAUAW7/wB4AFsQAAADABAAAAMDAPGDJIA\\=\\,aMuBcsg\\=",
-                                   "payload", G_TYPE_INT, 96,
-                                    NULL);
-    }
-    
-
-    if (!GST_IS_CAPS(caps))
-        g_printerr("caps not valid\n");
+    GstCaps *caps = NULL;
 
     // create elements
     pipeline = gst_pipeline_new("streamer");
@@ -271,7 +426,7 @@ int run_client(gboolean headless, gboolean bunny, gboolean debug, GMainLoop *loo
     }
 
     g_object_set(G_OBJECT(udpsrc), "uri", "udp://0.0.0.0:5000",
-                 "timeout", 1550000000, "caps", caps, NULL);
+                 "timeout", 1550000000, "buffer-size", 10000000, NULL);
 
     g_object_set(G_OBJECT(jitterbuf), "latency", 600, NULL);
 
@@ -290,7 +445,7 @@ int run_client(gboolean headless, gboolean bunny, gboolean debug, GMainLoop *loo
     stats_element = jitterbuf;
 
     if (debug) {
-        /* get rtp source pad */
+        /* get udp source pad */
         GstPad *pad;
         pad = gst_element_get_static_pad(udpsrc, "src");
         gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER_LIST, 
@@ -302,6 +457,23 @@ int run_client(gboolean headless, gboolean bunny, gboolean debug, GMainLoop *loo
         gst_object_unref(pad);
     }
 
+    if (auto_caps) {
+        if (exchange_caps(host, port, &caps) != 0) {
+            g_printerr("Caps exchange failed\n");
+            return -1;
+        }
+        g_print("Auto exchanged caps successfull.\n");
+    } else {
+        get_static_caps(bunny, &caps);
+    }
+    
+    if (GST_IS_CAPS(caps)) {
+        g_object_set(G_OBJECT(udpsrc), "caps", caps, NULL);
+    } else {
+        g_printerr("Caps not valid\n");
+    }
+    
+    
     /* start the pipeline */
     g_print ("Start...\n");
     gst_element_set_state(GST_ELEMENT (pipeline), GST_STATE_PLAYING);
@@ -347,8 +519,9 @@ int main (int argc, char *argv[])
     gboolean bunny = FALSE;
     gboolean headless = FALSE;
     gboolean debug = FALSE;
+    gboolean auto_caps = FALSE;
     gchar *host = NULL;
-    gint *port = NULL;
+    gint port = 5000;
     gchar *file_path = NULL;
     GOptionContext *ctx;
     GError *err = NULL;
@@ -367,10 +540,13 @@ int main (int argc, char *argv[])
          "use big buck bunny caps", NULL},
         {"debug", 'd', 0, G_OPTION_ARG_NONE, &debug,
          "print debug info", NULL},
+        {"auto", 'a', 0, G_OPTION_ARG_NONE, &auto_caps,
+         "automatic caps exchange", NULL},
         {NULL}
     };
 
-    ctx = g_option_context_new("UDP streaming");
+    ctx = g_option_context_new("-h IP -p PORT -f VIDEO_FILE");
+    g_option_context_set_summary(ctx, "Supported encoding: H264\nSupported container: avi, mkv, mp4");
     g_option_context_add_main_entries(ctx, entries, NULL);
     g_option_context_add_group(ctx, gst_init_get_option_group());
     if (!g_option_context_parse(ctx, &argc, &argv, &err)) {
@@ -383,12 +559,11 @@ int main (int argc, char *argv[])
 
     //init
     gst_init(NULL, NULL);
-
     int ret;
     if (server)
-        ret = run_server(file_path, host, port, debug, loop);
+        ret = run_server(file_path, host, port, auto_caps, debug, loop);
     else
-        ret = run_client(headless, bunny, debug, loop);
+        ret = run_client(headless, host, port, bunny, auto_caps, debug, loop);
 
     if (ret != 0) {
         g_printerr("Failed init. Exit...\n");

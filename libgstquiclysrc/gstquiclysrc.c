@@ -141,7 +141,16 @@ enum
   PROP_QUICLY_MTU
 };
 
-/* rtp header and framing for stream mode */
+/* rtp header */
+typedef struct {
+    uint8_t ver_p_x_cc;
+    uint8_t m_pt;
+    uint16_t seq_nr;
+    uint32_t timestamp;
+    uint32_t ssrc;
+} rtp_hdr;
+
+/* rtp header with framing for stream mode */
 typedef struct {
     uint16_t framing;
     uint8_t ver_p_x_cc;
@@ -541,7 +550,6 @@ gst_quiclysrc_start (GstBaseSrc * src)
     }
   }
 
-
   /* set connected, for the on_receive functions */
   quiclysrc->connected = TRUE;
   /* set application context */
@@ -735,7 +743,7 @@ gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
         }
 
         memcpy(info.data, input.base + 2, hdr->framing);
-        //g_print("FILL. Len: %li. Pushed data: %i\n", input.len, hdr->framing);
+        
         /* stats */
         ++quiclysrc->num_packets;
         quiclysrc->num_bytes += hdr->framing;
@@ -748,6 +756,7 @@ gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
 
   quiclysrc->ivec.buffer = info.data;
   quiclysrc->ivec.size = info.size;
+  /* TODO: Change timeout. Mabe should call send_pending after ~20ms and then continue loop*/
   do {
     if (!g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN | G_IO_PRI, 6000000, quiclysrc->cancellable, &err)) {
       if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_BUSY) ||
@@ -846,16 +855,33 @@ static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len)
   return 0;
 }
 
+/* Send ack for caps to server */
+static void ack_caps_receive(GstQuiclysrc *quiclysrc)
+{
+  quicly_stream_t *stream;
+  if (quicly_open_stream(quiclysrc->conn, &stream, 0) == 0) {
+    gchar send[] = "MSG:CAPS;DATA:OK\n";
+    quicly_streambuf_egress_write(stream, send, strlen(send));
+    quicly_streambuf_egress_shutdown(stream);
+    if (send_pending(quiclysrc) == 0)
+      GST_INFO_OBJECT (quiclysrc, "Caps ack send");
+  }
+}
+
 static void send_caps_event(GstQuiclysrc *quiclysrc)
 {
   GstPad *pad = GST_BASE_SRC_PAD(quiclysrc);
   GST_DEBUG_OBJECT(quiclysrc, "Setting caps downstream.");
-  if (!gst_pad_set_caps(pad, quiclysrc->caps))
+  if (gst_pad_set_caps(pad, quiclysrc->caps)) {
+    ack_caps_receive(quiclysrc);
+  } else {
     g_printerr("Could not set caps downstream\n");
+  }
 }
 
 /*
  * Would be better to differentiate by stream id. e.g. always send caps on stream id 1
+ * TODO: Regardless -> split the function up
  **/
 static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *src, size_t len)
 {
@@ -872,6 +898,7 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
     if (strcmp(head, msg) == 0) {
       char str[input.len];
       memcpy(str, input.base, input.len);
+      GST_DEBUG_OBJECT(quiclysrc, "Received MSG string: %s", str);
       char delim[] = ":;\n";
       char *token;
       char check[] = "DATA";
@@ -883,15 +910,16 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
 
       while (token != NULL) {
         if (found) {
-          cp = gst_structure_from_string(token, NULL);
-          _caps = gst_caps_new_full(cp, NULL);
-          if (GST_IS_CAPS(_caps)) {
+          if ((cp = gst_structure_from_string(token, NULL)) == NULL) {
+            /* Didn't get the whole caps string or broken. Skip */
+            return 0;
+          }
+          if (((_caps = gst_caps_new_full(cp, NULL)) != NULL) && GST_IS_CAPS(_caps)) {
             if (quiclysrc->caps)
               gst_caps_unref(quiclysrc->caps);
             quiclysrc->caps = _caps;
             send_caps_event(quiclysrc);
-            g_print("Caps set from source.\n");
-            GST_DEBUG_OBJECT(quiclysrc, "Caps: %s", gst_caps_to_string(_caps));
+            GST_INFO_OBJECT(quiclysrc, "Caps received: %s", gst_caps_to_string(_caps));
           }
           break;
         }
@@ -901,6 +929,13 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
       }
       quicly_streambuf_ingress_shift(stream, input.len);
     } else {
+      rtp_hdr_ *hdr = (rtp_hdr_*) input.base;
+      uint8_t version = hdr->ver_p_x_cc >> 6;
+      if (version != 2) {
+        /* Not an rtp packet with stream framing. Skip */
+        return 0;
+      }
+
       /* else: data stream */
       if (quiclysrc->stream == NULL)
         quiclysrc->stream = stream;
@@ -908,9 +943,6 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
       /* already pushed to this buffer, skip */
       if (quiclysrc->pushed)
         return 0;
-
-      /* TODO: Check rtp header version field */
-      rtp_hdr_ *hdr = (rtp_hdr_*) input.base;
       
       if ((hdr->framing <= (input.len - 2)) && (input.len >= 2)) {
         if (quiclysrc->connected && (quiclysrc->ivec.size >= len)) {

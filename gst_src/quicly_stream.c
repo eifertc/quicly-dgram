@@ -185,7 +185,7 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
 {
     g_print("Starting as server...\n");
 
-    GstElement *filesrc, *qtdemux, *rtph264pay, *quiclysink, *rtpmp4gpay;
+    GstElement *filesrc, *demux, *rtph264pay, *quiclysink, *rtpmp4gpay;
     GstElement *pipeline;
     GstBus *bus;
     guint bus_watch_id;
@@ -193,12 +193,24 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
         // create elements
     pipeline = gst_pipeline_new("streamer");
     filesrc = gst_element_factory_make("filesrc", "fs");
-    qtdemux = gst_element_factory_make("qtdemux", "demux");
     rtph264pay = gst_element_factory_make("rtph264pay", "rtp");
     //rtpmp4gpay = gst_element_factory_make("rtpmp4gpay", "rtp");
     quiclysink = gst_element_factory_make("quiclysink", "quicly");
 
-    if (!pipeline || !filesrc || !qtdemux || !rtph264pay || !quiclysink) {
+    /* Choose demuxer based on file */
+    char comp_str[strlen(file_path)];
+    memcpy(comp_str, file_path, strlen(file_path)); 
+    char *type = "mkv";
+    char delim[] = ".";
+    char *ptr = strtok(comp_str, delim);
+    ptr = strtok(NULL, delim);
+    if (strncmp(ptr, type, 3) == 0) {
+        demux = gst_element_factory_make("matroskademux", "demux");
+    } else {
+        demux = gst_element_factory_make("qtdemux", "demux");
+    }
+
+    if (!pipeline || !filesrc || !demux || !rtph264pay || !quiclysink) {
         g_printerr ("One element could not be created. Exiting.\n");
         return -1;
     }
@@ -229,11 +241,11 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
     gst_object_unref (bus);
 
     //add elements to pipeline
-    gst_bin_add_many (GST_BIN (pipeline), filesrc, qtdemux, rtph264pay, quiclysink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), filesrc, demux, rtph264pay, quiclysink, NULL);
     //gst_bin_add_many (GST_BIN (pipeline), filesrc, rtpmp4gpay, quiclysink, NULL);
 
     // link
-    if (!gst_element_link(filesrc, qtdemux))
+    if (!gst_element_link(filesrc, demux))
         g_warning("Failed to link filesrc");
     if (!gst_element_link(rtph264pay, quiclysink))
         g_warning("Failed to link rtp to quiclysink");
@@ -244,7 +256,7 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
     if (!gst_element_link(rtpmp4gpay, quiclysink))
         g_warning("Failed to link rtp to quiclysink");
     */
-    g_signal_connect(qtdemux, "pad-added", G_CALLBACK(on_pad_added), rtph264pay);
+    g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), rtph264pay);
 
     if (debug) {
         /* get rtp source pad */
@@ -433,7 +445,8 @@ int main (int argc, char *argv[])
         {NULL}
     };
 
-    ctx = g_option_context_new("Quicly stream server");
+    ctx = g_option_context_new("-c CERT_FILE -k KEY_FILE -f VIDEO_FILE");
+    g_option_context_set_summary(ctx, "Supported encoding: H264\nSupported container: avi, mkv, mp4");
     g_option_context_add_main_entries(ctx, entries, NULL);
     g_option_context_add_group(ctx, gst_init_get_option_group());
     if (!g_option_context_parse(ctx, &argc, &argv, &err)) {

@@ -64,7 +64,8 @@ struct _GstQuiclysink
   gchar *cert;
   gchar *key;
 
-  
+  /* crutch */
+  gboolean received_caps_ack;
   
   quicly_dgram_t *dgram;
   quicly_stream_t *stream;

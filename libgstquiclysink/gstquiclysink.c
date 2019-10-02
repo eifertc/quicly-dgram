@@ -198,6 +198,7 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->num_bytes = 0;
   quiclysink->silent = TRUE;
   quiclysink->stream_mode = FALSE;
+  quiclysink->received_caps_ack = FALSE;
 
   /* Setup quicly and tls context */
   quiclysink->tlsctx.random_bytes = ptls_openssl_random_bytes;
@@ -454,6 +455,8 @@ gst_quiclysink_start (GstBaseSink * sink)
   }
 
   g_print("CONNECTED\n");
+  /* set application context for stream callbacks */
+  quicly_set_data(quiclysink->conn, (void*) quiclysink);
 
   return TRUE;
 }
@@ -710,7 +713,7 @@ static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t le
 
 static int send_pending(GstQuiclysink *quiclysink)
 {
-  quicly_datagram_t *packets[48];
+  quicly_datagram_t *packets[24];
   size_t num_packets, i;
   gssize rret;
   int ret;
@@ -758,32 +761,41 @@ static int send_pending(GstQuiclysink *quiclysink)
   return ret;
 }
 
-static void send_caps(GstQuiclysink *quiclysink)
+static int send_caps(GstQuiclysink *quiclysink)
 {
   gchar *cp = gst_caps_to_string(quiclysink->caps);
-  GST_DEBUG_OBJECT (quiclysink, "Caps send: %s", cp);
   quicly_stream_t *stream;
-  if (quicly_open_stream(quiclysink->conn, &stream, 0) == 0) {
+  int ret;
+  if ((ret = quicly_open_stream(quiclysink->conn, &stream, 0)) == 0) {
     gchar send[strlen(cp) + 20];
     sprintf(send, "MSG:CAPS;DATA:%s\n", cp);
     quicly_streambuf_egress_write(stream, send, strlen(send));
     quicly_streambuf_egress_shutdown(stream);
   }
   g_free(cp);
+  return ret;
 }
 
 static gboolean gst_quiclysink_set_caps (GstBaseSink *sink, GstCaps *caps)
 {
   GstQuiclysink *quiclysink = GST_QUICLYSINK (sink);
-  GST_DEBUG_OBJECT (quiclysink, "Caps set: %s", gst_caps_to_string(caps));
+  GST_LOG_OBJECT (quiclysink, "Caps set: %s", gst_caps_to_string(caps));
+  int ret = -1;
   if (quiclysink->caps)
     gst_caps_unref(caps);
   quiclysink->caps = gst_caps_copy (caps);
+  if (quiclysink->conn != NULL) {
+    if (send_caps(quiclysink) == 0) {
+      do {
+        ret = send_pending(quiclysink);
+      } while ((ret == 0) && (!quiclysink->received_caps_ack));
+      GST_INFO_OBJECT(quiclysink, "Send caps and received ack");
+    }
+  }
+  if (ret != 0)
+    GST_ERROR_OBJECT(quiclysink, "Send caps failed");
 
-  if (quiclysink->conn != NULL)
-    send_caps(quiclysink);
-
-  return TRUE;
+  return (ret == 0) ? TRUE : FALSE;
 }
 
 static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len)
@@ -794,8 +806,23 @@ static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len)
 
 static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *src, size_t len)
 {
-  /* We shouldn't receive anything yet */
-  /* TODO: Add meta data exchange (gstreamer caps) via streams */
+  GstQuiclysink *quiclysink = GST_QUICLYSINK (*quicly_get_data(stream->conn));
+  ptls_iovec_t input;
+  char msg[] = "MSG";
+  int ret;
+
+  if ((ret = quicly_streambuf_ingress_receive(stream, off, src, len)) != 0)
+    return ret;
+
+  if ((input = quicly_streambuf_ingress_get(stream)).len != 0) {
+    char head[4] = {input.base[0], input.base[1], input.base[2], '\0'};
+    if (strcmp(head, msg) == 0) {
+      /* TODO: Read all of the message. For now I only have the caps ack */
+      /* Set received_caps_ack */
+      GST_DEBUG_OBJECT(quiclysink, "RECEIVED CAPS ACK");
+      quiclysink->received_caps_ack = TRUE;
+    }
+  }
   return 0;
 }
 
