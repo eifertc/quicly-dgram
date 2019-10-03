@@ -88,6 +88,8 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
         gst_buffer_map(buffer, &map, GST_MAP_READ);
         rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
 
+        g_print("%i ", hdr->seq_nr);
+        /*
         if (hdr->seq_nr != prev_seq + 256) {
             if (hdr->seq_nr < prev_seq) {
                 num_lost += ((65535 - prev_seq) + hdr->seq_nr) / 256; 
@@ -108,6 +110,7 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
 
         rtp_packet_num++;
         rtp_bytes += map.size;
+        */
         gst_buffer_unmap(buffer, &map);
     }
     packets_lost++;
@@ -117,7 +120,7 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
 
 static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
-    /*
+    
     GstMapInfo map;
     GstBuffer *buffer;
     int num_lost = 0;
@@ -126,6 +129,8 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
     gst_buffer_map(buffer, &map, GST_MAP_READ);
     rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
 
+    g_print("%i ", hdr->seq_nr);
+    /*
     if (hdr->seq_nr != prev_seq + 256) {
         if (hdr->seq_nr < prev_seq) {
             num_lost = ((65535 - prev_seq) + hdr->seq_nr) / 256; 
@@ -149,6 +154,7 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
     gst_buffer_unmap(buffer, &map);
     */
 
+    /*
     if (last_time != 0) {
         uint64_t t = get_time();
         uint64_t dif = t - last_time;
@@ -160,7 +166,7 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
     } else {
         last_time = get_time();
     }
-
+    */
     return GST_PAD_PROBE_OK;
 }
 
@@ -307,7 +313,7 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
 {
     g_print("Starting as client...\n");
 
-    GstElement *quiclysrc, *rtp, *decodebin, *sink, *jitterbuf, *rtpmp4gdepay;
+    GstElement *quiclysrc, *rtp, *decodebin, *sink, *jitterbuf, *rtpmp4gdepay, *queue;
     GstElement *pipeline;
 
     GstBus *bus;
@@ -318,6 +324,7 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
     rtp = gst_element_factory_make("rtph264depay", "rtp");
     //rtpmp4gdepay = gst_element_factory_make("rtpmp4gdepay", "rtp");
     decodebin = gst_element_factory_make("decodebin", "dec");
+    queue = gst_element_factory_make("queue2", "thread_queue");
 
     if (headless) {
         sink = gst_element_factory_make("fakesink", "sink");
@@ -327,7 +334,7 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
 
     jitterbuf = gst_element_factory_make("rtpjitterbuffer", "jitterbuf");
 
-    if (!pipeline || !quiclysrc || !rtp || !decodebin || !sink || !jitterbuf) {
+    if (!pipeline || !quiclysrc || !rtp || !decodebin || !sink || !jitterbuf || !queue) {
         g_printerr ("One element could not be created. Exiting.\n");
         return -1;
     }
@@ -344,11 +351,11 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
     bus_watch_id = gst_bus_add_watch (bus, msg_handler, loop);
     gst_object_unref (bus);
 
-    gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, rtp, decodebin, sink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, queue, rtp, decodebin, sink, NULL);
     //gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, rtpmp4gdepay, decodebin, sink, NULL);
 
-    // link
-    if (!gst_element_link_many(quiclysrc, jitterbuf, rtp, decodebin, NULL))
+    /* Add queue after jitterbuffer, so measurements are not falsified by buffer */
+    if (!gst_element_link_many(quiclysrc, jitterbuf, queue, rtp, decodebin, NULL))
         g_warning("Failed to link many");
     
     /*

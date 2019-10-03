@@ -398,7 +398,7 @@ int run_server(gchar *file_path, gchar *host, gint port, gboolean auto_caps, gbo
 
 int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboolean auto_caps, gboolean debug, GMainLoop *loop)
 {
-    GstElement *udpsrc, *rtp, *decodebin, *sink, *jitterbuf;
+    GstElement *udpsrc, *rtp, *decodebin, *sink, *jitterbuf, *queue;
 
     GstElement *pipeline;
     GstBus *bus;
@@ -412,6 +412,7 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
     rtp = gst_element_factory_make("rtph264depay", "rtp");
     decodebin = gst_element_factory_make("decodebin", "dec");
     //decodebin = gst_element_factory_make("avdec_h264", "dec");
+    queue = gst_element_factory_make("queue2", "thread_queue");
 
     if (headless) {
         sink = gst_element_factory_make("fakesink", "sink");
@@ -420,7 +421,7 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
     }
     jitterbuf = gst_element_factory_make("rtpjitterbuffer", "jitterbuf");
 
-    if (!pipeline || !udpsrc || !rtp || !decodebin || !sink || !jitterbuf) {
+    if (!pipeline || !udpsrc || !rtp || !decodebin || !sink || !jitterbuf || !queue) {
         g_printerr ("One element could not be created. Exiting.\n");
         return -1;
     }
@@ -435,9 +436,10 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
     bus_watch_id = gst_bus_add_watch (bus, msg_handler, loop);
     gst_object_unref (bus);
 
-    gst_bin_add_many (GST_BIN (pipeline), udpsrc, jitterbuf, rtp, decodebin, sink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), udpsrc, jitterbuf, queue, rtp, decodebin, sink, NULL);
 
-    if (!gst_element_link_many(udpsrc, jitterbuf, rtp, decodebin, NULL))
+    /* Add queue after jitterbuffer, so delay values are not falsified by buffering */
+    if (!gst_element_link_many(udpsrc, jitterbuf, queue, rtp, decodebin, NULL))
         g_warning("Failed to link many");
 
     g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
