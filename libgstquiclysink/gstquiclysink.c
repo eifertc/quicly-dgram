@@ -103,7 +103,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
                                                          on_receive_dgram};
 
 #define UDP_DEFAULT_BIND_ADDRESS  "0.0.0.0"
-#define UDP_DEFAULT_BIND_PORT     17001
+#define UDP_DEFAULT_BIND_PORT     5000
 #define QUICLY_DEFAULT_MTU        1280
 #define DEFAULT_CERTIFICATE       NULL
 #define DEFAULT_PRIVATE_KEY       NULL

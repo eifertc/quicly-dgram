@@ -187,7 +187,7 @@ static void on_pad_added(GstElement *ele, GstPad *pad, gpointer data)
     gst_object_unref(sinkpad);
 }
 
-int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean stream_mode, gboolean debug, GMainLoop *loop)
+int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gint port, gboolean stream_mode, gboolean debug, GMainLoop *loop)
 {
     g_print("Starting as server...\n");
 
@@ -231,13 +231,19 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
         return -1;
     }
 
+    if (port == 0) {
+        g_print("Default port: 5000\n");
+        port = 5000;
+    }
+
     g_object_set(G_OBJECT(filesrc), "location", file_path, NULL);
-    g_object_set(G_OBJECT(quiclysink), "bind-port", 5000, 
+    g_object_set(G_OBJECT(quiclysink), "bind-port", port, 
                           "cert", cert_file,
                           "key", key_file, NULL);
     if (stream_mode)
         g_object_set(G_OBJECT(quiclysink), "stream-mode", TRUE, NULL);
 
+    /* TODO: Set to 1280? That's the value I set as default in quiclysink? */
     g_object_set(G_OBJECT(rtph264pay), "mtu", 1200, NULL);
     //g_object_set(G_OBJECT(rtpmp4gpay), "mtu", 1200, NULL);
 
@@ -309,7 +315,7 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gboolean str
     return 0;
 }
 
-int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMainLoop *loop)
+int run_client(gchar *host, gint port, gboolean headless, gboolean debug, GMainLoop *loop)
 {
     g_print("Starting as client...\n");
 
@@ -339,7 +345,7 @@ int run_client(gchar *host, gint *port, gboolean headless, gboolean debug, GMain
         return -1;
     }
 
-    if (host == NULL || port == NULL) {
+    if (host == NULL || port == 0) {
         g_print("Specify host and port\n");
         return -1;
     }
@@ -417,7 +423,7 @@ int main (int argc, char *argv[])
 
     /* Parse command line options */
     gchar *host = NULL;
-    gint *port = NULL;
+    gint port = 0;
     gboolean headless = FALSE;
     gboolean debug = FALSE;
     gboolean stream_mode = FALSE;
@@ -482,7 +488,7 @@ int main (int argc, char *argv[])
 
     int ret;
     if (key_file != NULL)
-        ret = run_server(file_path, cert_file, key_file, stream_mode, debug, loop);
+        ret = run_server(file_path, cert_file, key_file, port, stream_mode, debug, loop);
     else 
         ret = run_client(host, port, headless, debug, loop);
 

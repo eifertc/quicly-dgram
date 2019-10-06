@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 
 GstElement *stats_element;
+gboolean pipeline_ready = FALSE;
 
 static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
 {
@@ -20,7 +21,7 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
     src = GST_MESSAGE_SRC_NAME(msg);
     g_print("MSG FROM: %s. TYPE: %s\n", src, type);
     */
-
+    gchar *ob_name = GST_OBJECT_NAME(msg->src);
     switch (GST_MESSAGE_TYPE(msg)) {
         case GST_MESSAGE_EOS:
             g_print("End of stream\n");
@@ -46,10 +47,54 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
             g_print("UDP Timeout. Stopping...\n");
             g_main_loop_quit(loop);
             break;
+        case GST_MESSAGE_STATE_CHANGED: {
+            /*
+            GstState old;
+            GstState new;
+            //GstState pending;
+            gst_message_parse_state_changed(msg, &old, &new, NULL);
+            g_print("Element %s changed state from %s to %s\n", ob_name, 
+                    gst_element_state_get_name(old), gst_element_state_get_name(new));
+            if ((strcmp(ob_name, "streamer") == 0) && (new == GST_STATE_READY)) {
+                g_print("Pipeline Ready\n");
+                pipeline_ready = TRUE;
+            }
+            */
+            break;
+        }
+        case GST_MESSAGE_STREAM_STATUS: {
+            GstStreamStatusType type;
+            GstElement *owner;
+            gst_message_parse_stream_status(msg, &type, &owner);
+            gchar *name = gst_element_get_name(owner);
+            switch (type) {
+                case GST_STREAM_STATUS_TYPE_CREATE:
+                    g_print("Thread create announced. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_START:
+                    g_print("Thread started. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_ENTER:
+                    g_print("Thread entered loop. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_PAUSE:
+                    g_print("Thread paused. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_LEAVE:
+                    g_print("Thread left loop. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_STOP:
+                    g_print("Thread stopped. Element: %s\n", name);
+                    break;
+                default:
+                    break;
+            }
+            g_free(name);
+            break;
+        }
         default:
             break;
     }
-
     return TRUE;
 }
 
@@ -93,6 +138,11 @@ static void get_static_caps(gboolean bunny, GstCaps **caps)
                                     NULL);
     } else {
         *caps = gst_caps_new_simple("application/x-rtp",
+                                    "encoding-name", G_TYPE_STRING, "H264",
+                                    "payload", G_TYPE_INT, 96,
+                                    NULL);
+        /*
+        *caps = gst_caps_new_simple("application/x-rtp",
                                    "media", G_TYPE_STRING, "video",
                                    "clock-rate", G_TYPE_INT, 90000,
                                    "encoding-name", G_TYPE_STRING, "H264",
@@ -101,13 +151,15 @@ static void get_static_caps(gboolean bunny, GstCaps **caps)
                                    "sprop-parameter-sets", G_TYPE_STRING, "Z0LAH9kAUAW7/wB4AFsQAAADABAAAAMDAPGDJIA\\=\\,aMuBcsg\\=",
                                    "payload", G_TYPE_INT, 96,
                                     NULL);
+        */
     }
 }
 
 static int exchange_caps(gchar *host, gint port, GstCaps **caps)
 {
+    g_print("Getting caps...");
     GSocket *sock;
-    GError *err;
+    GError *err = NULL;
     if ((sock = g_socket_new(G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_STREAM, 0, &err)) == NULL) {
         g_printerr("Could not create socket\n");
         g_error_free(err);
@@ -156,6 +208,7 @@ static int exchange_caps(gchar *host, gint port, GstCaps **caps)
     //g_print("CAPS: %s", gst_caps_to_string(*caps));
 
     g_socket_close(sock, NULL);
+    g_print("Done\n");
 
     return 0;
 }
@@ -211,6 +264,17 @@ static GstPadProbeReturn cb_get_caps_event(GstPad *pad, GstPadProbeInfo *info, g
         g_socket_close(sock, NULL);
         g_socket_listener_close(listen);
         g_print("Done.\n");
+
+        /* sleep 500ms. For debugging */
+        /*
+        struct timespec ts;
+        ts.tv_sec = 1500 / 1000;
+        ts.tv_nsec = (1500 % 1000) * 1000000;
+        nanosleep(&ts, &ts);
+        */
+        sleep(1);
+        g_print("end sleep\n");
+
         gst_element_set_state(GST_ELEMENT (con_data->pipeline), GST_STATE_PLAYING);
         return GST_PAD_PROBE_REMOVE;
     } 
@@ -326,7 +390,7 @@ int run_server(gchar *file_path, gchar *host, gint port, gboolean auto_caps, gbo
 
     g_object_set(G_OBJECT(filesrc), "location", file_path, NULL);
     g_object_set(G_OBJECT(udpsink), "host", host, "port", port, NULL);
-    g_object_set(G_OBJECT(rtph264pay), "mtu", 1200, NULL);
+    g_object_set(G_OBJECT(rtph264pay), "mtu", 1200, "config-interval", 1, NULL);
 
     /* message handler */
     bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
@@ -408,7 +472,7 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
 
     // create elements
     pipeline = gst_pipeline_new("streamer");
-    udpsrc = gst_element_factory_make("udpsrc", "fs");
+    udpsrc = gst_element_factory_make("udpsrc", "udps");
     rtp = gst_element_factory_make("rtph264depay", "rtp");
     decodebin = gst_element_factory_make("decodebin", "dec");
     //decodebin = gst_element_factory_make("avdec_h264", "dec");
@@ -426,8 +490,8 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
         return -1;
     }
 
-    g_object_set(G_OBJECT(udpsrc), "uri", "udp://0.0.0.0:5000",
-                 "timeout", 1550000000, "buffer-size", 10000000, NULL);
+    g_object_set(G_OBJECT(udpsrc), "uri", "udp://0.0.0.0:5000", NULL);
+                // "timeout", 1550000000, "buffer-size", 10000000, NULL);
 
     g_object_set(G_OBJECT(jitterbuf), "latency", 600, NULL);
 
@@ -459,6 +523,41 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
         gst_object_unref(pad);
     }
 
+    /*
+    GstState state;
+    GstStateChangeReturn ret;
+    if (auto_caps) {
+        ret = gst_element_set_state(GST_ELEMENT(pipeline), GST_STATE_PAUSED);
+        g_print("State Change: %i\n", ret);
+        g_print("set state playing\n");
+        ret = gst_element_get_state(pipeline, &state, NULL, GST_CLOCK_TIME_NONE);
+        switch (ret) {
+            case GST_STATE_CHANGE_FAILURE:
+                g_print("State change failed\n");
+                return -1;
+                break;
+            case GST_STATE_CHANGE_ASYNC:
+                g_print("Async state change\n");
+                return -1;
+                break;
+            case GST_STATE_CHANGE_SUCCESS:
+            case GST_STATE_CHANGE_NO_PREROLL:
+                sleep(1);
+                g_print("State: %s, exchanging caps\n", gst_element_state_get_name(state));
+                if (exchange_caps(host, port, &caps) != 0) {
+                    g_printerr("Caps exchange failed\n");
+                    return -1;
+                }
+                break;
+            default:
+                break;
+        }
+    } else {
+        get_static_caps(bunny, &caps);
+    }
+    */
+
+    
     if (auto_caps) {
         if (exchange_caps(host, port, &caps) != 0) {
             g_printerr("Caps exchange failed\n");
@@ -468,13 +567,11 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
     } else {
         get_static_caps(bunny, &caps);
     }
-    
     if (GST_IS_CAPS(caps)) {
         g_object_set(G_OBJECT(udpsrc), "caps", caps, NULL);
     } else {
         g_printerr("Caps not valid\n");
     }
-    
     
     /* start the pipeline */
     g_print ("Start...\n");
