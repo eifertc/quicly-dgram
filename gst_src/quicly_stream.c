@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/time.h>
+#include <pthread.h>
 
 int rtp_packet_num = 0;
 gssize rtp_bytes = 0;
@@ -29,6 +30,60 @@ inline uint64_t get_time() {
     struct timeval t;
     gettimeofday(&t, NULL);
     return t.tv_sec * (int)1e6 + t.tv_usec;
+}
+
+//static void on_stream_status(GstBus *bus, GstMessage *msg, gpointer user_data)
+GstBusSyncReply on_stream_status(GstBus *bus, GstMessage *msg, gpointer user_data)
+{   
+    if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_STREAM_STATUS) {
+        GstStreamStatusType type;
+        GstElement *owner;
+        const GValue *val;
+        //GstTask *task = NULL;
+        gchar *name;
+
+        gst_message_parse_stream_status(msg, &type, &owner);
+        val = gst_message_get_stream_status_object(msg);
+        name = gst_element_get_name(owner);
+
+        if (G_VALUE_TYPE(val) == GST_TYPE_TASK)
+            g_print("VALUE IS TASK\n");
+
+        switch (type) {
+            case GST_STREAM_STATUS_TYPE_CREATE: {
+                g_print("Stream CREATE. FROM: %s. thread id; %ld\n", name, pthread_self());
+                break;
+            }
+            case GST_STREAM_STATUS_TYPE_START: {
+                g_print("Stream START. FROM: %s\n", name);
+                break;
+            }
+            case GST_STREAM_STATUS_TYPE_ENTER:
+                g_print("Thread entered loop. Element: %s. ID: %ld\n", name, pthread_self());
+                break;
+            case GST_STREAM_STATUS_TYPE_PAUSE:
+                g_print("Thread paused. Element: %s\n", name);
+                break;
+            case GST_STREAM_STATUS_TYPE_LEAVE:
+                g_print("Thread left loop. Element: %s. ID: %ld\n", name, pthread_self());
+                break;
+            case GST_STREAM_STATUS_TYPE_STOP:
+                g_print("Thread stopped. Element: %s\n", name);
+                break;
+            default:
+                g_print("UNKNOWN TYPE\n");
+                break;
+        }
+        g_free(name);
+    }
+    return GST_BUS_PASS;
+}
+
+static void
+on_eos (GstBus *bus, GstMessage *message, gpointer user_data)
+{
+    GMainLoop *loop = (GMainLoop *) user_data;
+    g_main_loop_quit (loop);
 }
 
 static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
@@ -64,6 +119,37 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
             g_print("QOS MESSAGE. From: %s. Jitter: %ld. Dropped: %lu. Processed: %lu.\n",
                         name, jitter, dropped, processed);
             g_free(name);
+            break;
+        }
+        case GST_MESSAGE_STREAM_STATUS: {
+            GstStreamStatusType type;
+            GstElement *owner;
+            gst_message_parse_stream_status(msg, &type, &owner);
+            gchar *name = gst_element_get_name(owner);
+            switch (type) {
+                case GST_STREAM_STATUS_TYPE_CREATE:
+                    g_print("Thread create announced. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_START:
+                    g_print("Thread started. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_ENTER:
+                    g_print("Thread entered loop. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_PAUSE:
+                    g_print("Thread paused. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_LEAVE:
+                    g_print("Thread left loop. Element: %s\n", name);
+                    break;
+                case GST_STREAM_STATUS_TYPE_STOP:
+                    g_print("Thread stopped. Element: %s\n", name);
+                    break;
+                default:
+                    break;
+            }
+            g_free(name);
+            break;
         }
         default:
             break;
@@ -330,7 +416,7 @@ int run_client(gchar *host, gint port, gboolean headless, gboolean debug, GMainL
     rtp = gst_element_factory_make("rtph264depay", "rtp");
     //rtpmp4gdepay = gst_element_factory_make("rtpmp4gdepay", "rtp");
     decodebin = gst_element_factory_make("decodebin", "dec");
-    queue = gst_element_factory_make("queue2", "thread_queue");
+    queue = gst_element_factory_make("queue", "thread_queue");
 
     if (headless) {
         sink = gst_element_factory_make("fakesink", "sink");
@@ -351,24 +437,42 @@ int run_client(gchar *host, gint port, gboolean headless, gboolean debug, GMainL
     }
 
     g_object_set(G_OBJECT(quiclysrc), "host", host, "port", port, NULL);
+    g_object_set(G_OBJECT(jitterbuf), "latency", 400, "mode", 0, NULL);
+    g_object_set(G_OBJECT(queue), "max-size-buffers", 1000, NULL);
 
     /* message handler */
+    /*
     bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
     bus_watch_id = gst_bus_add_watch (bus, msg_handler, loop);
     gst_object_unref (bus);
+    */
+    
 
-    gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, queue, rtp, decodebin, sink, NULL);
-    //gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, rtpmp4gdepay, decodebin, sink, NULL);
+    GstBus *bus2;
+    bus2 = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
+    gst_bus_enable_sync_message_emission(bus2);
+    gst_bus_set_sync_handler(bus2, on_stream_status, NULL, NULL);
+    /*
+    gst_bus_add_signal_watch (bus2);
+    g_signal_connect (bus2, "sync-message::stream-status",
+      (GCallback) on_stream_status, NULL);
+    g_signal_connect (bus2, "message::eos",
+      (GCallback) on_eos, loop);
+      */
+    
+    //gst_bin_add_many (GST_BIN (pipeline), quiclysrc, queue, jitterbuf, rtp, decodebin, sink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), queue, quiclysrc, jitterbuf, sink, NULL);
 
     /* Add queue after jitterbuffer, so measurements are not falsified by buffer */
-    if (!gst_element_link_many(quiclysrc, jitterbuf, queue, rtp, decodebin, NULL))
+    //if (!gst_element_link_many(quiclysrc, jitterbuf, queue, rtp, decodebin, NULL))
+    if (!gst_element_link_many(quiclysrc, queue, jitterbuf, sink, NULL))
         g_warning("Failed to link many");
     
     /*
     if (!gst_element_link_many(quiclysrc, jitterbuf, rtpmp4gdepay, decodebin, NULL))
         g_warning("Failed to link many");
     */
-    g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
+    //g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
 
     if (debug) {
         /* get rtp source pad */
@@ -384,6 +488,7 @@ int run_client(gchar *host, gint port, gboolean headless, gboolean debug, GMainL
     }
 
     /* start the pipeline */
+    g_print("APPLICATION THREAD ID: %ld\n", pthread_self());
     gst_element_set_state(GST_ELEMENT (pipeline), GST_STATE_PLAYING);
 
     g_main_loop_run(loop);
@@ -409,6 +514,7 @@ int run_client(gchar *host, gint port, gboolean headless, gboolean debug, GMainL
     gst_element_set_state (pipeline, GST_STATE_NULL);
 
     g_print ("Deleting pipeline\n");
+    gst_object_unref (bus2);
     gst_object_unref (GST_OBJECT (pipeline));
     g_source_remove (bus_watch_id);
 

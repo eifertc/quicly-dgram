@@ -32,6 +32,7 @@ G_BEGIN_DECLS
 #define GST_QUICLYSRC_CLASS(klass)   (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_QUICLYSRC,GstQuiclysrcClass))
 #define GST_IS_QUICLYSRC(obj)   (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_QUICLYSRC))
 #define GST_IS_QUICLYSRC_CLASS(obj)   (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_QUICLYSRC))
+#define GST_QUICLYSRC_CAST(obj)   ((GstQuiclysrc *)(obj))
 
 typedef struct _GstQuiclysrc GstQuiclysrc;
 typedef struct _GstQuiclysrcClass GstQuiclysrcClass;
@@ -82,6 +83,18 @@ struct _GstQuiclysrc
 
   GCancellable *cancellable;
   gboolean made_cancel_fd;
+
+  /* For buffer list output */
+  GstAllocator *allocator;
+  GstAllocationParams params;
+
+  GstMemory **mem_list;
+  GstMapInfo **map_list;
+  GInputVector **vec_list;
+  gint *pushed_list;
+
+  gboolean mem_list_allocated;
+  gsize mem_list_size; 
 };
 
 struct _GstQuiclysrcClass

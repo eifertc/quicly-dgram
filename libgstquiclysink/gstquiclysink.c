@@ -424,8 +424,10 @@ gst_quiclysink_start (GstBaseSink * sink)
       } else {
         wait = 0;
       }
+    } else {
+      wait = timeout_at;
     }
-    if (g_socket_condition_timed_wait(quiclysink->socket, G_IO_IN, wait, NULL, &err)) {
+    if (g_socket_condition_timed_wait(quiclysink->socket, G_IO_IN | G_IO_PRI, wait, NULL, &err)) {
       if (receive_packet(quiclysink) != 0) {
         g_printerr("Error in receive_packet\n");
       }

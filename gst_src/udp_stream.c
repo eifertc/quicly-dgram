@@ -23,6 +23,11 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
     */
     gchar *ob_name = GST_OBJECT_NAME(msg->src);
     switch (GST_MESSAGE_TYPE(msg)) {
+        case GST_MESSAGE_BUFFERING: {
+            gint percent = 0;
+            gst_message_parse_buffering(msg, &percent);
+            g_print("Buffering: %i\n", percent);
+        }
         case GST_MESSAGE_EOS:
             g_print("End of stream\n");
             g_main_loop_quit(loop);
@@ -490,23 +495,24 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
         return -1;
     }
 
-    g_object_set(G_OBJECT(udpsrc), "uri", "udp://0.0.0.0:5000", NULL);
-                // "timeout", 1550000000, "buffer-size", 10000000, NULL);
-
-    g_object_set(G_OBJECT(jitterbuf), "latency", 600, NULL);
+    g_object_set(G_OBJECT(udpsrc), "uri", "udp://0.0.0.0:5000",
+                 "timeout", 1550000000, "buffer-size", 10000000, NULL);
+    g_object_set(G_OBJECT(jitterbuf), "latency", 400, "mode", 0, NULL);
 
     /* message handler */
     bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
     bus_watch_id = gst_bus_add_watch (bus, msg_handler, loop);
     gst_object_unref (bus);
 
-    gst_bin_add_many (GST_BIN (pipeline), udpsrc, jitterbuf, queue, rtp, decodebin, sink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), udpsrc, jitterbuf, sink, NULL);
+    //gst_bin_add_many (GST_BIN (pipeline), udpsrc, jitterbuf, sink, NULL);
 
     /* Add queue after jitterbuffer, so delay values are not falsified by buffering */
-    if (!gst_element_link_many(udpsrc, jitterbuf, queue, rtp, decodebin, NULL))
+    //if (!gst_element_link_many(udpsrc, jitterbuf, sink, NULL))
+    if (!gst_element_link_many(udpsrc, jitterbuf, sink, NULL))
         g_warning("Failed to link many");
 
-    g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
+    //g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
 
     stats_element = jitterbuf;
 
