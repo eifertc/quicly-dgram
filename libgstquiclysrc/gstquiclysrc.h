@@ -94,7 +94,7 @@ struct _GstQuiclysrc
   gint *pushed_list;
 
   gboolean mem_list_allocated;
-  gsize mem_list_size; 
+  gsize mem_list_size;
 };
 
 struct _GstQuiclysrcClass

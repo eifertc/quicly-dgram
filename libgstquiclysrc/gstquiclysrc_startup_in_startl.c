@@ -487,6 +487,74 @@ gst_quiclysrc_start (GstBaseSrc * src)
   }
   g_object_unref(bind_addr_t);
 
+    /* convert to native for quicly_connect */
+  gssize len = g_socket_address_get_native_size(quiclysrc->dst_addr);
+  struct sockaddr native_sa;
+  if(!g_socket_address_to_native(quiclysrc->dst_addr, &native_sa,
+                             len,
+                             &err)) {
+    g_printerr("Could not convert GSocketAddress to native. Error: %s\n", err->message);
+    return FALSE;
+  }
+  socklen_t salen = sizeof(native_sa);
+
+
+  /* Quicly connect */
+  int64_t timeout_at;
+  int64_t delta;
+  int64_t wait = 0;
+  err = NULL;
+  int ret;
+
+  if ((ret = quicly_connect(&quiclysrc->conn, &quiclysrc->ctx,
+                            quiclysrc->host,
+                            &native_sa,
+                            salen,
+                            &quiclysrc->next_cid,
+                            &quiclysrc->hs_properties,
+                            &quiclysrc->resumed_transport_params)) != 0) {
+    g_printerr("Quicly connect failed\n");
+    return FALSE;
+  }
+  ++quiclysrc->next_cid.master_id;
+
+  if ((ret = send_pending(quiclysrc)) != 0)
+    g_printerr("Could not send inital packets.\n");
+
+
+  g_print("Connecting...\n");
+  while(quicly_connection_is_ready(quiclysrc->conn) == 0) {
+    timeout_at = quiclysrc->conn != NULL ? quicly_get_first_timeout(quiclysrc->conn) : INT64_MAX;
+    if (timeout_at != INT64_MAX) {
+      delta = timeout_at - quiclysrc->ctx.now->cb(quiclysrc->ctx.now);
+      if (delta > 0) {
+        wait = delta * 1000;
+      } else {
+        wait = 0;
+      }
+    }
+    if (g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN, wait, NULL, &err)) {
+      if (receive_packet(quiclysrc, err) != 0) {
+        g_printerr("Error in receive_packet\n");
+      }
+    }
+    err = NULL;
+    if ((quiclysrc->conn != NULL)) {
+      if (send_pending(quiclysrc) != 0) {
+        quicly_free(quiclysrc->conn);
+        g_print("Connection closed while sending\n");
+        quiclysrc->conn = NULL;
+        return FALSE;
+      }
+    }
+  }
+
+  /* set connected, for the on_receive functions */
+  quiclysrc->connected = TRUE;
+  /* set application context */
+  quicly_set_data(quiclysrc->conn, (void*) quiclysrc);
+
+  g_print("Connection established\n");
   return TRUE;
 }
 
@@ -616,82 +684,6 @@ gst_quiclysrc_unlock_stop (GstBaseSrc * src)
   return TRUE;
 }
 
-static gboolean initial_connect(GstQuiclysrc *quiclysrc)
-{
-  GError *err;
-
-  /* convert to native for quicly_connect */
-  gssize len = g_socket_address_get_native_size(quiclysrc->dst_addr);
-  struct sockaddr native_sa;
-  if(!g_socket_address_to_native(quiclysrc->dst_addr, &native_sa,
-                             len,
-                             &err)) {
-    g_printerr("Could not convert GSocketAddress to native. Error: %s\n", err->message);
-    return FALSE;
-  }
-  socklen_t salen = sizeof(native_sa);
-
-
-  /* Quicly connect */
-  int64_t timeout_at;
-  int64_t delta;
-  int64_t wait = 0;
-  err = NULL;
-  int ret;
-
-  if ((ret = quicly_connect(&quiclysrc->conn, &quiclysrc->ctx,
-                            quiclysrc->host,
-                            &native_sa,
-                            salen,
-                            &quiclysrc->next_cid,
-                            &quiclysrc->hs_properties,
-                            &quiclysrc->resumed_transport_params)) != 0) {
-    g_printerr("Quicly connect failed\n");
-    return FALSE;
-  }
-  ++quiclysrc->next_cid.master_id;
-
-  if ((ret = send_pending(quiclysrc)) != 0)
-    g_printerr("Could not send inital packets.\n");
-
-
-  g_print("Connecting...\n");
-  while(quicly_connection_is_ready(quiclysrc->conn) == 0) {
-    timeout_at = quiclysrc->conn != NULL ? quicly_get_first_timeout(quiclysrc->conn) : INT64_MAX;
-    if (timeout_at != INT64_MAX) {
-      delta = timeout_at - quiclysrc->ctx.now->cb(quiclysrc->ctx.now);
-      if (delta > 0) {
-        wait = delta * 1000;
-      } else {
-        wait = 0;
-      }
-    }
-    if (g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN, wait, NULL, &err)) {
-      if (receive_packet(quiclysrc, err) != 0) {
-        g_printerr("Error in receive_packet\n");
-      }
-    }
-    err = NULL;
-    if ((quiclysrc->conn != NULL)) {
-      if (send_pending(quiclysrc) != 0) {
-        quicly_free(quiclysrc->conn);
-        g_print("Connection closed while sending\n");
-        quiclysrc->conn = NULL;
-        return FALSE;
-      }
-    }
-  }
-
-  /* set connected, for the on_receive functions */
-  quiclysrc->connected = TRUE;
-  /* set application context */
-  quicly_set_data(quiclysrc->conn, (void*) quiclysrc);
-
-  g_print("Connection established\n");
-
-  return TRUE;
-}
-
 /* ask the subclass to fill the buffer with data from offset and size */
 static GstFlowReturn
 gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
@@ -699,13 +691,6 @@ gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
   GstQuiclysrc *quiclysrc = GST_QUICLYSRC (src);
 
   GST_DEBUG_OBJECT (quiclysrc, "fill");
-
-  if (quiclysrc->conn == NULL) {
-    if (!initial_connect(quiclysrc)) {
-      g_print("Could not connect.\n");
-      return GST_FLOW_ERROR;
-    }
-  }
 
   if (quiclysrc->transport_close) {
     g_print("END OF STREAM\n");

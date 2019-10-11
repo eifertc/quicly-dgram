@@ -227,14 +227,9 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
                                   strlen(quiclysink->cid_key)));
 
 
-  quiclysink->ctx.event_log.cb = quicly_new_default_event_logger(stderr);
+  //quiclysink->ctx.event_log.cb = quicly_new_default_event_logger(stderr);
   //quiclysink->ctx.event_log.mask = UINT64_MAX;
   /*
-  quiclysink->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_LOST) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_PTO |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_LOST));
-  */
   quiclysink->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_CONGESTION) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAMS_BLOCKED_SEND) |
@@ -250,7 +245,7 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_TEST) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_LOST);
-
+  */
   quiclysink->conn = NULL;
   quiclysink->dgram = NULL;
   /* -------- end context init --------------*/
@@ -550,7 +545,10 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
     g_printerr("Max payload size exceeded: %lu\n", map.size);
     return GST_FLOW_ERROR;
   }
-
+  /*
+  rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
+  g_print("%i\n", hdr->seq_nr);
+  */
   /* write buffer to quicly dgram buffer */
   /* TODO: use internal buffer and send directly without copy */
   if (!quiclysink->stream_mode){
@@ -595,6 +593,7 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
     GST_LOG_OBJECT(quiclysink, "empty buffer list");
     return GST_FLOW_OK;
   }
+
   /* write buffers to quicly dgram buffer */
   for (i = 0; i < num_buffers; ++i) {
     buffer = gst_buffer_list_get(buffer_list, i);
@@ -606,7 +605,10 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
         return GST_FLOW_ERROR;
       }
       all += map.size;
-
+      /*
+      rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
+      g_print("%i\n", hdr->seq_nr);
+      */
       if (!quiclysink->stream_mode) {
         write_dgram_buffer(quiclysink->dgram, map.data, map.size);
       } else {
@@ -810,7 +812,6 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
 {
   GstQuiclysink *quiclysink = GST_QUICLYSINK (*quicly_get_data(stream->conn));
   ptls_iovec_t input;
-  char msg[] = "MSG";
   int ret;
 
   if ((ret = quicly_streambuf_ingress_receive(stream, off, src, len)) != 0)
@@ -818,12 +819,13 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
 
   if ((input = quicly_streambuf_ingress_get(stream)).len != 0) {
     char head[4] = {input.base[0], input.base[1], input.base[2], '\0'};
-    if (strcmp(head, msg) == 0) {
+    g_print("STREAM MESSAGE: %s\n", head);
+    if (strcmp(head, "MSG") == 0) {
       /* TODO: Read all of the message. For now I only have the caps ack */
       /* Set received_caps_ack */
       GST_DEBUG_OBJECT(quiclysink, "RECEIVED CAPS ACK");
       quiclysink->received_caps_ack = TRUE;
-    }
+    } 
   }
   return 0;
 }

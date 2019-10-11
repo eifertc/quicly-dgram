@@ -42,6 +42,12 @@ GstBusSyncReply on_stream_status(GstBus *bus, GstMessage *msg, gpointer user_dat
         //GstTask *task = NULL;
         gchar *name;
 
+        if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
+            GMainLoop *loop = (GMainLoop *) user_data;
+            g_print("End of stream. Stopping playback...\n");
+            g_main_loop_quit(loop);
+        }
+
         gst_message_parse_stream_status(msg, &type, &owner);
         val = gst_message_get_stream_status_object(msg);
         name = gst_element_get_name(owner);
@@ -89,6 +95,8 @@ on_eos (GstBus *bus, GstMessage *message, gpointer user_data)
 static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
 {
     GMainLoop *loop = (GMainLoop *) data;
+    gchar *name;
+    name = gst_object_get_name(msg->src);
 
     switch (GST_MESSAGE_TYPE(msg)) {
         case GST_MESSAGE_EOS:
@@ -112,13 +120,19 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
             guint64 processed;
             guint64 dropped;
             gint64 jitter;
-            gchar *name;
-            name = gst_object_get_name(msg->src);
+            
             gst_message_parse_qos_values(msg, &jitter, NULL, NULL);
             gst_message_parse_qos_stats(msg, NULL, &processed, &dropped);
             g_print("QOS MESSAGE. From: %s. Jitter: %ld. Dropped: %lu. Processed: %lu.\n",
                         name, jitter, dropped, processed);
-            g_free(name);
+            break;
+        }
+        case GST_MESSAGE_STATE_CHANGED: {
+            GstState old;
+            GstState new;
+            gst_message_parse_state_changed(msg, &old, &new, NULL);
+            g_print("Element %s changed state from %s to %s\n", name, 
+                    gst_element_state_get_name(old), gst_element_state_get_name(new));
             break;
         }
         case GST_MESSAGE_STREAM_STATUS: {
@@ -154,7 +168,7 @@ static gboolean msg_handler(GstBus *bus, GstMessage *msg, gpointer data)
         default:
             break;
     }
-
+    g_free(name);
     return TRUE;
 }
 
@@ -293,9 +307,7 @@ int run_server(gchar *file_path, gchar *cert_file, gchar *key_file, gint port, g
     char comp_str[strlen(file_path)];
     memcpy(comp_str, file_path, strlen(file_path)); 
     char *type = "mkv";
-    char delim[] = ".";
-    char *ptr = strtok(comp_str, delim);
-    ptr = strtok(NULL, delim);
+    char *ptr = &file_path[strlen(file_path)-3];
     if (strncmp(ptr, type, 3) == 0) {
         demux = gst_element_factory_make("matroskademux", "demux");
     } else {
@@ -441,18 +453,20 @@ int run_client(gchar *host, gint port, gboolean headless, gboolean debug, GMainL
     g_object_set(G_OBJECT(queue), "max-size-buffers", 1000, NULL);
 
     /* message handler */
-    /*
     bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
     bus_watch_id = gst_bus_add_watch (bus, msg_handler, loop);
     gst_object_unref (bus);
-    */
     
-
+    
+    /*
     GstBus *bus2;
     bus2 = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
     gst_bus_enable_sync_message_emission(bus2);
-    gst_bus_set_sync_handler(bus2, on_stream_status, NULL, NULL);
-    /*
+
+    //way 1
+    gst_bus_set_sync_handler(bus2, on_stream_status, loop, NULL);
+
+    // way 2
     gst_bus_add_signal_watch (bus2);
     g_signal_connect (bus2, "sync-message::stream-status",
       (GCallback) on_stream_status, NULL);
@@ -460,19 +474,19 @@ int run_client(gchar *host, gint port, gboolean headless, gboolean debug, GMainL
       (GCallback) on_eos, loop);
       */
     
-    //gst_bin_add_many (GST_BIN (pipeline), quiclysrc, queue, jitterbuf, rtp, decodebin, sink, NULL);
-    gst_bin_add_many (GST_BIN (pipeline), queue, quiclysrc, jitterbuf, sink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, rtp, decodebin, sink, NULL);
+    //gst_bin_add_many (GST_BIN (pipeline), quiclysrc, jitterbuf, sink, NULL);
 
     /* Add queue after jitterbuffer, so measurements are not falsified by buffer */
-    //if (!gst_element_link_many(quiclysrc, jitterbuf, queue, rtp, decodebin, NULL))
-    if (!gst_element_link_many(quiclysrc, queue, jitterbuf, sink, NULL))
+    //if (!gst_element_link_many(quiclysrc, jitterbuf, sink, NULL))
+    if (!gst_element_link_many(quiclysrc, jitterbuf, rtp, decodebin, NULL))
         g_warning("Failed to link many");
     
     /*
     if (!gst_element_link_many(quiclysrc, jitterbuf, rtpmp4gdepay, decodebin, NULL))
         g_warning("Failed to link many");
     */
-    //g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
+    g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
 
     if (debug) {
         /* get rtp source pad */
@@ -514,7 +528,7 @@ int run_client(gchar *host, gint port, gboolean headless, gboolean debug, GMainL
     gst_element_set_state (pipeline, GST_STATE_NULL);
 
     g_print ("Deleting pipeline\n");
-    gst_object_unref (bus2);
+    //gst_object_unref (bus2);
     gst_object_unref (GST_OBJECT (pipeline));
     g_source_remove (bus_watch_id);
 
