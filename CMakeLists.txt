@@ -64,6 +64,8 @@ SET(GST_SRC_LIBRARY_FILES
 PKG_CHECK_MODULES(GST REQUIRED
             gstreamer-1.0
             gstreamer-base-1.0
+            gstreamer-plugins-base-1.0
+            gstreamer-plugins-good-1.0
             gstreamer-net-1.0)
 message("${GST_CFLAGS}")
 #SET(GST_CFLAGS "-std=99 -Wall ${GST_CFLAGS}")
@@ -117,7 +119,7 @@ TARGET_COMPILE_OPTIONS(gstquiclysrc
 
 # gstreamer applications
 ADD_EXECUTABLE(quicly_stream gst_src/quicly_stream.c)
-TARGET_LINK_LIBRARIES(quicly_stream ${GST_LIBRARIES})
+TARGET_LINK_LIBRARIES(quicly_stream ${GST_LIBRARIES} "-lgstrtp-1.0")
 TARGET_COMPILE_OPTIONS(quicly_stream
                        PUBLIC
                        ${GST_CFLAGS})

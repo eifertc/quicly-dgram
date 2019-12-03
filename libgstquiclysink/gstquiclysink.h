@@ -77,11 +77,17 @@ struct _GstQuiclysink
   gssize num_bytes;
 
   gboolean stream_mode;
+
+  //quicly_stats_t quicly_stats;
 };
 
 struct _GstQuiclysinkClass
 {
   GstBaseSinkClass base_quiclysink_class;
+
+  /* signals */
+  void (*on_feedback_report) (GstQuiclysink *quiclysink, guint32 lrtt,
+                             guint32 srtt, guint64 sent, guint64 lost);
 };
 
 GType gst_quiclysink_get_type (void);

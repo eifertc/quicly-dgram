@@ -52,8 +52,6 @@ GST_DEBUG_CATEGORY_STATIC (gst_quiclysink_debug_category);
 #define GST_CAT_DEFAULT gst_quiclysink_debug_category
 
 /* prototypes */
-
-
 static void gst_quiclysink_set_property (GObject * object,
     guint property_id, const GValue * value, GParamSpec * pspec);
 static void gst_quiclysink_get_property (GObject * object,
@@ -109,6 +107,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define DEFAULT_PRIVATE_KEY       NULL
 #define DEFAULT_STREAM_MODE       FALSE
 
+/* properties */
 enum
 {
   PROP_0,
@@ -119,6 +118,15 @@ enum
   PROP_QUICLY_MTU,
   PROP_STREAM_MODE
 };
+
+/* signals */
+enum
+{
+  SIGNAL_ON_FEEDBACK_REPORT,
+  LAST_SIGNAL
+};
+
+static guint quiclysink_signals[LAST_SIGNAL] = {0}; 
 
 /* pad templates */
 
@@ -152,6 +160,20 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
       "FIXME Long name", "Generic", "FIXME Description",
       "FIXME <fixme@example.com>");
 
+  /**
+   * GstQuiclysink::on-feedback-report
+   * @quiclysink: the object sending the signal
+   * @lrtt: uint32_t containing the latest rtt
+   * @srtt: uint32_t containing the smoothed rtt
+   * @sent: uin64_t containing num packets sent
+   * @lost: uin64_t containing num packets lost
+   */
+  quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT] =
+    g_signal_new("on-feedback-report", G_TYPE_FROM_CLASS(klass),
+    G_SIGNAL_RUN_LAST, G_STRUCT_OFFSET(GstQuiclysinkClass, on_feedback_report),
+    NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 4,
+    G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT64, G_TYPE_UINT64);
+
   gobject_class->set_property = gst_quiclysink_set_property;
   gobject_class->get_property = gst_quiclysink_get_property;
   gobject_class->dispose = gst_quiclysink_dispose;
@@ -160,7 +182,9 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   base_sink_class->start = GST_DEBUG_FUNCPTR (gst_quiclysink_start);
   base_sink_class->stop = GST_DEBUG_FUNCPTR (gst_quiclysink_stop);
   //base_sink_class->event = GST_DEBUG_FUNCPTR (gst_quiclysink_event);
-  base_sink_class->set_caps = GST_DEBUG_FUNCPTR (gst_quiclysink_set_caps);
+  
+  /* Uncomment to enable auto caps exchange via quic stream */
+  //base_sink_class->set_caps = GST_DEBUG_FUNCPTR (gst_quiclysink_set_caps);
   base_sink_class->render = GST_DEBUG_FUNCPTR (gst_quiclysink_render);
   base_sink_class->render_list = GST_DEBUG_FUNCPTR (gst_quiclysink_render_list);
 
@@ -227,11 +251,11 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
                                   strlen(quiclysink->cid_key)));
 
 
-  //quiclysink->ctx.event_log.cb = quicly_new_default_event_logger(stderr);
-  //quiclysink->ctx.event_log.mask = UINT64_MAX;
-  /*
-  quiclysink->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_CONGESTION) |
+  quiclysink->ctx.event_log.cb = quicly_new_default_event_logger(stderr);
+  quiclysink->ctx.event_log.mask = UINT64_MAX;
+  
+  quiclysink->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_CONGESTION) |
+                         //((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAMS_BLOCKED_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_DATA_BLOCKED_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAMS_BLOCKED_RECEIVE) |
@@ -240,12 +264,12 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_STREAM_DATA_RECEIVE) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_RECEIVE) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_SEND) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_PTO) |
+                         //((uint64_t)1 << QUICLY_EVENT_TYPE_PTO) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_TEST) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_LOST);
-  */
+  
   quiclysink->conn = NULL;
   quiclysink->dgram = NULL;
   /* -------- end context init --------------*/
@@ -325,7 +349,6 @@ void
 gst_quiclysink_finalize (GObject * object)
 {
   GstQuiclysink *quiclysink = GST_QUICLYSINK (object);
-
   GST_DEBUG_OBJECT (quiclysink, "finalize");
 
   /* clean up object here */
@@ -525,12 +548,26 @@ typedef struct {
     uint32_t ssrc;
 } rtp_hdr_;
 
+/* emit feedback signal
+ * TODO: Implement dedicated function in quicly.c instead of the memcpy one
+ */
+inline static void emit_feedback_signal(GstQuiclysink *quiclysink)
+{
+  quicly_stats_t stats;
+  quicly_get_stats(quiclysink->conn, &stats);
+  g_signal_emit(quiclysink, quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT], 0,
+    stats.rtt.latest, stats.rtt.smoothed, stats.num_packets.sent, stats.num_packets.lost);
+}
+
+/* TODO: Use only one function. e.g. call the same function from render and
+ *   render list
+ */
 static GstFlowReturn
 gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
 {
   GstQuiclysink *quiclysink = GST_QUICLYSINK (sink);
 
-  GST_DEBUG_OBJECT (quiclysink, "render");
+  GST_LOG_OBJECT (quiclysink, "render");
   if (!quiclysink->silent)
     g_print("Have data size %lu bytes\n", gst_buffer_get_size(buffer));
 
@@ -572,6 +609,8 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
       // use ret NOT rret
   }
 
+  //emit_feedback_signal(quiclysink);
+
   return GST_FLOW_OK;
 }
 
@@ -586,7 +625,7 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
   int ret;
   gssize all = 0;
 
-  GST_DEBUG_OBJECT(quiclysink, "render_list");
+  GST_LOG_OBJECT(quiclysink, "render_list");
 
   num_buffers = gst_buffer_list_length(buffer_list);
   if (num_buffers == 0) {
@@ -639,6 +678,8 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
       // TODO: FIX this with accurate error handling
       // use ret NOT rret
   }
+
+  //emit_feedback_signal(quiclysink);
 
   return flow;
 }
@@ -823,7 +864,7 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
     if (strcmp(head, "MSG") == 0) {
       /* TODO: Read all of the message. For now I only have the caps ack */
       /* Set received_caps_ack */
-      GST_DEBUG_OBJECT(quiclysink, "RECEIVED CAPS ACK");
+      GST_LOG_OBJECT(quiclysink, "RECEIVED CAPS ACK");
       quiclysink->received_caps_ack = TRUE;
     } 
   }

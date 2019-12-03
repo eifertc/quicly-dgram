@@ -365,18 +365,23 @@ int run_server(gchar *file_path, gchar *host, gint port, gboolean auto_caps, gbo
     GstElement *pipeline;
     GstBus *bus;
     guint bus_watch_id;
-
     pipeline = gst_pipeline_new("streamer");
     filesrc = gst_element_factory_make("filesrc", "fs");
     rtph264pay = gst_element_factory_make("rtph264pay", "rtp");
     udpsink = gst_element_factory_make("udpsink", "udp");
 
+    if (host == NULL || file_path == NULL) {
+        g_print("Specify video file path, host and port\n");
+        return -1;
+    }
+
     char comp_str[strlen(file_path)];
     memcpy(comp_str, file_path, strlen(file_path)); 
     char *type = "mkv";
-    char delim[] = ".";
-    char *ptr = strtok(comp_str, delim);
-    ptr = strtok(NULL, delim);
+    //char delim[] = ".";
+    //char *ptr = strtok(comp_str, delim);
+    //ptr = strtok(NULL, delim);
+    char *ptr = &file_path[strlen(file_path)-3];
     if (strncmp(ptr, type, 3) == 0) {
         demux = gst_element_factory_make("matroskademux", "demux");
     } else {
@@ -385,12 +390,7 @@ int run_server(gchar *file_path, gchar *host, gint port, gboolean auto_caps, gbo
 
     if (!pipeline || !filesrc || !demux || !rtph264pay || !udpsink) {
         g_printerr ("One element could not be created. Exiting.\n");
-        return -1;
-    }
-
-    if (host == NULL || file_path == NULL) {
-        g_print("Specify video file path, host and port\n");
-        return -1;
+        return -1; 
     }
 
     g_object_set(G_OBJECT(filesrc), "location", file_path, NULL);
@@ -497,22 +497,22 @@ int run_client(gboolean headless, gchar *host, gint port, gboolean bunny, gboole
 
     g_object_set(G_OBJECT(udpsrc), "uri", "udp://0.0.0.0:5000",
                  "timeout", 1550000000, "buffer-size", 10000000, NULL);
-    g_object_set(G_OBJECT(jitterbuf), "latency", 400, "mode", 0, NULL);
+    //g_object_set(G_OBJECT(jitterbuf), "latency", 400, "mode", 0, NULL);
 
     /* message handler */
     bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
     bus_watch_id = gst_bus_add_watch (bus, msg_handler, loop);
     gst_object_unref (bus);
 
-    gst_bin_add_many (GST_BIN (pipeline), udpsrc, jitterbuf, sink, NULL);
+    gst_bin_add_many (GST_BIN (pipeline), udpsrc, jitterbuf, rtp, decodebin, sink, NULL);
     //gst_bin_add_many (GST_BIN (pipeline), udpsrc, jitterbuf, sink, NULL);
 
     /* Add queue after jitterbuffer, so delay values are not falsified by buffering */
     //if (!gst_element_link_many(udpsrc, jitterbuf, sink, NULL))
-    if (!gst_element_link_many(udpsrc, jitterbuf, sink, NULL))
+    if (!gst_element_link_many(udpsrc, jitterbuf, rtp, decodebin, NULL))
         g_warning("Failed to link many");
 
-    //g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
+    g_signal_connect(decodebin, "pad-added", G_CALLBACK(on_pad_added), sink);
 
     stats_element = jitterbuf;
 
