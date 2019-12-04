@@ -16,6 +16,9 @@ gssize rtp_bytes = 0;
 FILE *fPtr = NULL;
 int prev_seq = 0;
 int packets_lost = 0;
+int num_buffers = 0;
+guint num_bytes = 0;
+gboolean udp_timeout = FALSE;
 
 typedef struct {
     uint8_t ver_p_x_cc;
@@ -27,7 +30,7 @@ typedef struct {
 
 uint64_t last_time = 0;
 uint64_t avg_time = 0;
-uint64_t num_buffers = 0;
+uint64_t num_buffers_rtp = 0;
 uint64_t highest_jit = 0;
 
 typedef struct _AppData
@@ -45,6 +48,7 @@ typedef struct _AppData
     gboolean debug;
     gboolean udp;
     gboolean aux;
+    gboolean scream;
     GstElement *jitterbuf;
 } AppData;
 
@@ -150,11 +154,13 @@ GstBusSyncReply on_stream_status(GstBus *bus, GstMessage *msg, gpointer user_dat
 static void
 cb_timeout(GstBus *bus, GstMessage *msg, gpointer data)
 {
-    const GstStructure *st = gst_message_get_structure(msg);
-    if (gst_structure_has_name(st, "GstUDPSrcTimeout")) {
-        g_print("UDP timeout\n");
-        GMainLoop *loop = (GMainLoop *) data;
-        g_main_loop_quit(loop);
+    if (udp_timeout) {
+        const GstStructure *st = gst_message_get_structure(msg);
+        if (gst_structure_has_name(st, "GstUDPSrcTimeout")) {
+            g_print("UDP timeout\n");
+            GMainLoop *loop = (GMainLoop *) data;
+            g_main_loop_quit(loop);
+        }
     }
 }
 
@@ -247,23 +253,36 @@ cb_state_change(GstBus *bus, GstMessage *msg, gpointer data)
     g_free(name);
 }
 
+static GstPadProbeReturn cb_udp_first_packet(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+{
+    udp_timeout = TRUE;
+
+    return GST_PAD_PROBE_REMOVE;
+}
+
 static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     GstMapInfo map;
     GstBufferList *buffer_list;
     GstBuffer *buffer;
-    guint num_buffers, i;
+    guint buffers, i;
     //int num_lost = 0;
 
     buffer_list = GST_PAD_PROBE_INFO_BUFFER_LIST(info);
-    num_buffers = gst_buffer_list_length(buffer_list);
+    buffers = gst_buffer_list_length(buffer_list);
 
-    for (i = 0; i < num_buffers; ++i) {
+    for (i = 0; i < buffers; ++i) {
+        num_buffers++;
+
         buffer = gst_buffer_list_get(buffer_list, i);
         gst_buffer_map(buffer, &map, GST_MAP_READ);
-        rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
+        num_bytes += map.size;
 
+        /*
+        rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
         g_print("%i ", hdr->seq_nr);
+        */
+    
         /*
         if (hdr->seq_nr != prev_seq + 256) {
             if (hdr->seq_nr < prev_seq) {
@@ -288,7 +307,7 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
         */
         gst_buffer_unmap(buffer, &map);
     }
-    packets_lost++;
+    //packets_lost++;
 
     return GST_PAD_PROBE_OK;
 }
@@ -302,9 +321,14 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
 
     buffer = GST_PAD_PROBE_INFO_BUFFER(info);
     gst_buffer_map(buffer, &map, GST_MAP_READ);
-    rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
+    num_bytes += map.size;
+    gst_buffer_unmap(buffer, &map);
 
+    /*
+    rtp_hdr_ *hdr = (rtp_hdr_ *) map.data;
     g_print("%i ", hdr->seq_nr);
+    */
+    
     /*
     if (hdr->seq_nr != prev_seq + 256) {
         if (hdr->seq_nr < prev_seq) {
@@ -335,13 +359,15 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
         uint64_t dif = t - last_time;
         avg_time += dif;
         last_time = t;
-        ++num_buffers;
+        ++num_buffers_rtp;
         if (dif > highest_jit)
             highest_jit = dif;
     } else {
         last_time = get_time();
     }
     */
+    num_buffers++;
+
     return GST_PAD_PROBE_OK;
 }
 
@@ -370,7 +396,8 @@ static void
 cb_new_jitterbuf(GstBin *rtpbin, GstElement *jitterbuf, guint session, guint ssrc, gpointer data)
 {
     AppData *adata = (AppData *) data;
-    adata->jitterbuf = jitterbuf;
+    if (!adata->jitterbuf)
+        adata->jitterbuf = jitterbuf;
 }
 
 static GstCaps *
@@ -506,22 +533,28 @@ static void cb_on_recv_rtcp(GObject *sess, GstBuffer *buffer, gpointer data)
   if (type == 201) {
     guint blocks = gst_rtcp_packet_get_rb_count(&packet);
     g_print("Block count: %i\n", blocks);
-    if (blocks < 1)
-      return;
+    if (blocks >= 1) {
 
-    guint32 ssrc, exthighestseq, jitter, lsr, dlsr;
-    guint8 fractionlost;
-    gint32 packetslost;
-    gst_rtcp_packet_get_rb(&packet, 0, &ssrc, &fractionlost, &packetslost, &exthighestseq,
-                          &jitter, &lsr, &dlsr);
-    g_print("Fractionlost: %i, Packets lost: %i, ExtHighestSeq: %u, Jitter: %u, LSR: %u, DLSR: %u\n",
-             fractionlost, packetslost, exthighestseq, jitter, lsr, dlsr);
+        guint32 ssrc, exthighestseq, jitter, lsr, dlsr;
+        guint8 fractionlost;
+        gint32 packetslost;
+        gst_rtcp_packet_get_rb(&packet, 0, &ssrc, &fractionlost, &packetslost, &exthighestseq,
+                              &jitter, &lsr, &dlsr);
+        g_print("Fractionlost: %i, Packets lost: %i, ExtHighestSeq: %u, Jitter: %u, LSR: %u, DLSR: %u\n",
+                 fractionlost, packetslost, exthighestseq, jitter, lsr, dlsr);
+    }
 
     if (!gst_rtcp_packet_move_to_next(&packet))
       return;
 
     type = gst_rtcp_packet_get_type(&packet);
     g_print("Second Packet type: %i\n", type);
+
+    if (!gst_rtcp_packet_move_to_next(&packet))
+      return;
+
+    type = gst_rtcp_packet_get_type(&packet);
+    g_print("Third Packet type: %i\n", type);
   }
 }
 
@@ -537,11 +570,11 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
 
     if (sdata->udp) {
         g_print("UDP transport for rtp stream\n");
-        rtpSink = gst_element_factory_make("udpsink", NULL);
+        rtpSink = gst_element_factory_make("udpsink", "rtpsink");
         g_object_set (rtpSink, "port", sdata->port, "host", sdata->host, NULL);
     } else {
         g_print("QUIC transport for rtp stream\n");
-        rtpSink = gst_element_factory_make("quiclysink", "quicly");
+        rtpSink = gst_element_factory_make("quiclysink", "rtpsink");
         g_object_set(rtpSink, "bind-port", sdata->port, 
                           "cert", sdata->cert_file,
                           "key", sdata->key_file, NULL);
@@ -549,7 +582,7 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
         if (sdata->stream_mode)
             g_object_set(rtpSink, "stream-mode", TRUE, NULL);
 
-        if (sdata->transcode) {
+        if (sdata->transcode || sdata->scream) {
             g_signal_connect(rtpSink, "on-feedback-report", G_CALLBACK(cb_on_feedback_report), NULL);
         }
     }
@@ -558,7 +591,7 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
         GstElement *rtcpSink = gst_element_factory_make ("udpsink", NULL);
         GstElement *rtcpSrc = gst_element_factory_make ("udpsrc", NULL);
         
-        g_object_set (rtcpSink, "port", sdata->port + 1, "host", "127.0.0.1", "sync",
+        g_object_set (rtcpSink, "port", sdata->port + 1, "host", sdata->host, "sync",
                         FALSE, "async", FALSE, NULL);
         g_object_set (rtcpSrc, "port", sdata->port + 5, NULL);
 
@@ -594,10 +627,11 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
 static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
 {
     SessionData *session;
-    GstElement *demux;
-    GstBin *videoBin = GST_BIN(gst_bin_new("video"));
+    GstElement *demux, *lastEle;
+    GstBin *videoBin = GST_BIN(gst_bin_new("videobin"));
     GstElement *filesrc = gst_element_factory_make("filesrc", "fs");
     GstElement *rtph264pay = gst_element_factory_make("rtph264pay", "rtppay");
+    lastEle = rtph264pay;
 
     /* Choose demuxer based on video container type*/
     char comp_str[strlen(sdata->file_path)];
@@ -622,18 +656,31 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
     //g_object_set(G_OBJECT(rtpmp4gpay), "mtu", 1200, NULL);
 
     /* Link with or without transcoding */
-    if (sdata->transcode) {
+    if (sdata->transcode || sdata->scream) {
         GstElement *decoder = gst_element_factory_make("avdec_h264", "decode");
         GstElement *queue = gst_element_factory_make("queue", "decode_queue");
-        GstElement *encoder = gst_element_factory_make("x264enc", "encode");
+        GstElement *encoder = gst_element_factory_make("x264enc", "video");
         /* TODO: add bitrate option */
-        g_object_set(encoder, "bitrate", 2000, NULL);
-        /* Second queue after encoder? */
-        gst_bin_add_many (videoBin, filesrc, demux, decoder, queue, encoder, rtph264pay, NULL);
+        g_object_set(encoder, "bitrate", 2000, "tune", 4, NULL);
+
+        if (sdata->scream) {
+            g_print("creating SCREAM\n");
+            GstElement *scream = gst_element_factory_make("gscreamtx", "scream");
+            g_object_set(scream, "media-src", 0, NULL);
+            gst_bin_add_many (videoBin, filesrc, demux, decoder, 
+                                queue, encoder, scream, rtph264pay, NULL);
+            gst_element_link_many(decoder, queue, encoder, rtph264pay, scream, NULL);
+            lastEle = scream;
+        } else {
+            /* Second queue after encoder? */
+            gst_bin_add_many (videoBin, filesrc, demux, decoder, queue, encoder, rtph264pay, NULL);
+            gst_element_link_many(decoder, queue, encoder, rtph264pay, NULL);
+        }
+        
         if (!gst_element_link(filesrc, demux))
             g_warning("Failed to link filesrc\n");
         g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), decoder);
-        gst_element_link_many(decoder, queue, encoder, rtph264pay, NULL);
+        
     } else {
         gst_bin_add_many(videoBin, filesrc, demux, rtph264pay, NULL);
         if (!gst_element_link(filesrc, demux))
@@ -655,7 +702,7 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
     }
 
     /* create src ghost pad on bin */
-    GstPad *srcPad = gst_element_get_static_pad(rtph264pay, "src");
+    GstPad *srcPad = gst_element_get_static_pad(lastEle, "src");
     GstPad *binPad = gst_ghost_pad_new("src", srcPad);
     gst_element_add_pad(GST_ELEMENT(videoBin), binPad);
 
@@ -694,9 +741,9 @@ int run_server(AppData *sdata)
     GstElement *rtpBin;
     GMainLoop *loop;
 
-    loop = g_main_loop_new (NULL, FALSE);
+    loop = g_main_loop_new(NULL, FALSE);
 
-    pipe = GST_PIPELINE (gst_pipeline_new (NULL));
+    pipe = GST_PIPELINE(gst_pipeline_new("mainPipeline"));
 
     /* message handler */
     bus = gst_element_get_bus (GST_ELEMENT (pipe));
@@ -707,7 +754,7 @@ int run_server(AppData *sdata)
     gst_bus_add_signal_watch(bus);
     gst_object_unref (bus);
 
-    rtpBin = gst_element_factory_make("rtpbin", NULL);
+    rtpBin = gst_element_factory_make("rtpbin", "rtpbin");
     g_object_set(rtpBin, "rtp-profile", GST_RTP_PROFILE_AVPF, NULL);
 
     gst_bin_add (GST_BIN (pipe), rtpBin);
@@ -721,8 +768,8 @@ int run_server(AppData *sdata)
     if (sdata->rtcp) {
         GObject *int_session;
         g_signal_emit_by_name(rtpBin, "get-internal-session", 0, &int_session);
-        g_signal_connect(int_session, "on_receiving_rtcp", G_CALLBACK(cb_on_recv_rtcp), NULL);
-        g_signal_connect(int_session, "on_send_rtcp", G_CALLBACK(cb_on_send_rtcp), NULL);
+        //g_signal_connect(int_session, "on_receiving_rtcp", G_CALLBACK(cb_on_recv_rtcp), NULL);
+        //g_signal_connect(int_session, "on_send_rtcp", G_CALLBACK(cb_on_send_rtcp), NULL);
     }
 
     /* start the pipeline */
@@ -749,8 +796,23 @@ int run_server(AppData *sdata)
     gst_structure_free(stats);
     g_free(str);
 
+    if (sdata->udp) {
+        g_signal_emit_by_name(gst_bin_get_by_name(GST_BIN(pipe), "rtpsink"),
+                              "get-stats", sdata->host, sdata->port, &stats);
+        str = gst_structure_to_string(stats);
+        g_print("##### UdpSink stats:\n%s\n", str);
+        gst_structure_free(stats);
+        g_free(str);
+    } else {
+        g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "rtpsink"), "stats", &stats, NULL);
+        str = gst_structure_to_string(stats);
+        g_print("##### QuiclySink stats:\n%s\n", str);
+        gst_structure_free(stats);
+        g_free(str);
+    }
+
     if (sdata->debug)
-        g_print("RTP packets created: %i. Bytes: %lu\n", rtp_packet_num, rtp_bytes);
+        g_print("Num buffers at sink: %i. Num bytes: %u\n", num_buffers, num_bytes);
 
     gst_element_set_state (GST_ELEMENT(pipe), GST_STATE_NULL);
 
@@ -770,11 +832,21 @@ add_client_stream(GstElement *pipe, GstElement *rtpBin, SessionData *session, Ap
     session->rtpbin = g_object_ref(rtpBin);
 
     if (adata->udp) {
-        rtpSrc = gst_element_factory_make("udpsrc", NULL);
+        rtpSrc = gst_element_factory_make("udpsrc", "rtpsrc");
+        // timeout: 1550000000
         g_object_set(rtpSrc, "port", adata->port, "caps", 
                         session->caps, "timeout", 1550000000, NULL);
+
+        /* Use a probe pad to recognize when we first receive a packet.
+         * After the first packet is received, the timeout activates
+         */
+        GstPad *pad;
+        pad = gst_element_get_static_pad(rtpSrc, "src");
+        gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, 
+                         (GstPadProbeCallback) cb_udp_first_packet,
+                         NULL, NULL);
     } else {
-        rtpSrc = gst_element_factory_make("quiclysrc", NULL);
+        rtpSrc = gst_element_factory_make("quiclysrc", "rtpsrc");
         g_object_set(G_OBJECT(rtpSrc), "host", adata->host, "port", adata->port, NULL);
     }
 
@@ -817,13 +889,14 @@ add_client_stream(GstElement *pipe, GstElement *rtpBin, SessionData *session, Ap
 
 static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
 {
-    GstElement *depay, *decoder, *sink, *queue;
+    GstElement *depay, *decoder, *sink, *queue, *ghostSink;
 
     SessionData *ret = session_new(sessionNum);
-    GstBin *bin = GST_BIN(gst_bin_new("video"));
+    GstBin *bin = GST_BIN(gst_bin_new("videobin"));
     depay = gst_element_factory_make("rtph264depay", "rtp");
     decoder = gst_element_factory_make ("avdec_h264", NULL);
     queue = gst_element_factory_make("queue", "thread_queue");
+    ghostSink = queue;
 
     if (cdata->headless) {
         sink = gst_element_factory_make("fakesink", "sink");
@@ -836,17 +909,24 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
         return NULL;
     }
 
-    gst_bin_add_many(bin, depay, decoder, queue, sink, NULL);
-    gst_element_link_many(queue, depay, decoder, sink, NULL);
-
-    GstPad *sinkPad = gst_element_get_static_pad(queue, "sink");
+    if (cdata->scream) {
+        GstElement *scream = gst_element_factory_make("gscreamrx", "scream");
+        gst_bin_add_many(bin, scream, depay, decoder, sink, NULL);
+        gst_element_link_many(scream, depay, decoder, sink, NULL);
+        ghostSink = scream;
+    } else {
+        gst_bin_add_many(bin, depay, decoder, queue, sink, NULL);
+        gst_element_link_many(queue, depay, decoder, sink, NULL);
+    }
+    
+    GstPad *sinkPad = gst_element_get_static_pad(ghostSink, "sink");
     GstPad *binPad = gst_ghost_pad_new ("sink", sinkPad);
     gst_element_add_pad (GST_ELEMENT (bin), binPad);
 
     if (cdata->debug) {
         /* get rtp sink pad */
         GstPad *pad;
-        pad = gst_element_get_static_pad(queue, "src");
+        pad = gst_element_get_static_pad(depay, "sink");
         gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER_LIST, 
                          (GstPadProbeCallback) cb_inspect_buf_list,
                          NULL, NULL);
@@ -881,7 +961,7 @@ int run_client(AppData *cdata)
         cdata->port = 5000;
 
     loop = g_main_loop_new(NULL, FALSE);
-    pipe = GST_PIPELINE(gst_pipeline_new(NULL));
+    pipe = GST_PIPELINE(gst_pipeline_new("mainPipeline"));
 
     /* message handlers */
     bus = gst_element_get_bus (GST_ELEMENT (pipe));
@@ -893,7 +973,7 @@ int run_client(AppData *cdata)
     gst_bus_add_signal_watch(bus);
     gst_object_unref (bus);
     
-    rtpBin = gst_element_factory_make("rtpbin", NULL);
+    rtpBin = gst_element_factory_make("rtpbin", "rtpbin");
     gst_bin_add(GST_BIN(pipe), rtpBin);
     g_object_set (rtpBin, "latency", 1000, "do-retransmission", cdata->aux,
       "rtp-profile", GST_RTP_PROFILE_AVPF, NULL);
@@ -915,16 +995,29 @@ int run_client(AppData *cdata)
     //stats
     GstStructure *stats;
     gchar *str;
-    g_object_get(cdata->jitterbuf, "stats", &stats, NULL);
-    str = gst_structure_to_string(stats);
-    g_print("##### Jitterbuffer stats:\n%s\n", str);
-    gst_structure_free(stats);
-    g_free(str);
+    if (cdata->jitterbuf) {
+        g_object_get(cdata->jitterbuf, "stats", &stats, NULL);
+        str = gst_structure_to_string(stats);
+        g_print("##### Jitterbuffer stats:\n%s\n", str);
+        gst_structure_free(stats);
+        g_free(str);
+    }
+
+    if(!cdata->udp) {
+        g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "rtpsrc"), "stats", &stats, NULL);
+        str = gst_structure_to_string(stats);
+        g_print("##### QuiclySrc stats:\n%s\n", str);
+        gst_structure_free(stats);
+        g_free(str);
+    }
 
     if (cdata->debug) {
+        g_print("Num rtp buffers: %i. Num bytes: %u\n", num_buffers, num_bytes);
+        /*
         g_print("Quiclysrc src pad. Packets pushed: %i. Packets lost: %i. Bytes: %lu\n", rtp_packet_num, packets_lost, rtp_bytes);
         g_print("\nAvg time between pushed buffers (in micro seconds): %lu. Highest: %lu\n", 
-                avg_time / num_buffers, highest_jit);
+                avg_time / num_buffers_rtp, highest_jit);
+        */
     }
 
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_NULL);
@@ -950,6 +1043,7 @@ int main (int argc, char *argv[])
     data.transcode = FALSE;
     data.rtcp = FALSE;
     data.aux = FALSE;
+    data.scream = FALSE;
     data.file_path = NULL;
     data.cert_file = NULL;
     data.key_file = NULL;
@@ -960,8 +1054,10 @@ int main (int argc, char *argv[])
     gchar *plugins = NULL;
     
     GOptionEntry entries[] = {
+        {"scream", 's', 0, G_OPTION_ARG_NONE, &data.scream,
+         "Use rmcat scream cc. Default: False", NULL},
         {"udp", 'u', 0, G_OPTION_ARG_NONE, &data.udp,
-         "Use udp transport. Quic is default.", NULL},
+         "Use udp transport. Default: Quic.", NULL},
         {"rtcp", 'r', 0, G_OPTION_ARG_NONE, &data.rtcp,
          "Enable RTCP messages. Default: False.", NULL},
         {"aux", 'a', 0, G_OPTION_ARG_NONE, &data.aux,
@@ -981,10 +1077,10 @@ int main (int argc, char *argv[])
         {"debug", 'd', 0, G_OPTION_ARG_NONE, &data.debug,
          "Print debug info", NULL},
         {"host", 'h', 0, G_OPTION_ARG_STRING, &data.host,
-         "Client. Host to connect to", NULL},
+         "Host to connect to.", NULL},
         {"port", 'p', 0, G_OPTION_ARG_INT, &data.port,
          "Client. Port to connect to", NULL},
-        {"headless", 's', 0, G_OPTION_ARG_NONE, &data.headless,
+        {"headless", 'H', 0, G_OPTION_ARG_NONE, &data.headless,
          "Client. Use fakesink", NULL},
         {"logfile", 'l', 0, G_OPTION_ARG_STRING, &data.logfile,
          "Use specified logfile", NULL}, 
@@ -1011,12 +1107,22 @@ int main (int argc, char *argv[])
     GstRegistry *reg;
     reg = gst_registry_get();
     gst_registry_scan_path(reg, plugins);
+    /* TODO: Remove and replace with multiple possible plugin paths? */
+    gst_registry_scan_path(reg, "../../scream/code/gscream/gst-gscreamtx/gst-plugin/src/.libs");
+    gst_registry_scan_path(reg, "../../scream/code/gscream/gst-gscreamrx/gst-plugin/src/.libs");
 
     if (data.logfile != NULL) {
         fPtr = g_fopen(data.logfile, "a");
 
         if (fPtr == NULL)
             g_printerr("Could not open log file. Err: %s\n", strerror(errno));
+    }
+
+    /* handle different modes */
+    if (data.scream) {
+        data.rtcp = TRUE;
+        data.aux = FALSE;
+        data.transcode = TRUE;
     }
 
     int ret;

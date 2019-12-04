@@ -80,6 +80,7 @@ static int on_receive_reset(quicly_stream_t *stream, int err);
 static int send_pending(GstQuiclysink *quiclysink);
 static int receive_packet(GstQuiclysink *quiclysink);
 static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len);
+static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink);
 
 static const char *ticket_file = NULL;
 
@@ -116,7 +117,8 @@ enum
   PROP_CERTIFICATE,
   PROP_PRIVATE_KEY,
   PROP_QUICLY_MTU,
-  PROP_STREAM_MODE
+  PROP_STREAM_MODE,
+  PROP_STATS
 };
 
 /* signals */
@@ -209,6 +211,9 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
                                   g_param_spec_boolean("stream-mode", "Stream Mode",
                                   "Use streams instead of datagrams.",
                                   DEFAULT_STREAM_MODE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property(gobject_class, PROP_STATS,
+                                  g_param_spec_boxed("stats", "Statistics", "Various Statistics",
+                                  GST_TYPE_STRUCTURE, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
@@ -327,6 +332,9 @@ gst_quiclysink_get_property (GObject * object, guint property_id,
   GST_DEBUG_OBJECT (quiclysink, "get_property");
 
   switch (property_id) {
+    case PROP_STATS:
+      g_value_take_boxed(value, gst_quiclysink_create_stats(quiclysink));
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
       break;
@@ -481,16 +489,25 @@ gst_quiclysink_start (GstBaseSink * sink)
   return TRUE;
 }
 
-static void dump_stats(FILE *fp, quicly_conn_t *conn)
+static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink)
 {
-    quicly_stats_t stats;
+  quicly_stats_t stats;
+  quicly_get_stats(quiclysink->conn, &stats);
+  GstStructure *s;
 
-    quicly_get_stats(conn, &stats);
-    fprintf(fp,
-            "packets-received: %" PRIu64 ", packets-sent: %" PRIu64 ", packets-lost: %" PRIu64 ", ack-received: %" PRIu64
-            ", bytes-received: %" PRIu64 ", bytes-sent: %" PRIu64 ", srtt: %" PRIu32 "\n",
-            stats.num_packets.received, stats.num_packets.sent, stats.num_packets.lost, stats.num_packets.ack_received,
-            stats.num_bytes.received, stats.num_bytes.sent, stats.rtt.smoothed);
+  s = gst_structure_new("quiclysink-stats",
+      "packets-received", G_TYPE_UINT64, stats.num_packets.received,
+      "packets-sent", G_TYPE_UINT64, stats.num_packets.sent,
+      "packets-lost", G_TYPE_UINT64, stats.num_packets.lost,
+      "acks-received", G_TYPE_UINT64, stats.num_packets.ack_received,
+      "bytes-received", G_TYPE_UINT64, stats.num_bytes.received,
+      "bytes-sent", G_TYPE_UINT64, stats.num_bytes.sent,
+      "rtt-smoothed", G_TYPE_UINT, stats.rtt.smoothed,
+      "rtt-latest", G_TYPE_UINT, stats.rtt.latest,
+      "rtt-minimum", G_TYPE_UINT, stats.rtt.minimum,
+      "rtt-variance", G_TYPE_UINT, stats.rtt.variance, NULL);
+
+  return s;
 }
 
 static gboolean
@@ -498,14 +515,8 @@ gst_quiclysink_stop (GstBaseSink * sink)
 {
   GstQuiclysink *quiclysink = GST_QUICLYSINK (sink);
 
-  GST_DEBUG_OBJECT (quiclysink, "stop");
-
-  /* Print stats */
-  g_print("###################### Quicly Stats ######################\n");
-  dump_stats(stdout, quiclysink->conn);
-  g_print("\nNum Packets send: %lu. Kilobytes send: %lu.\n", 
+  GST_DEBUG_OBJECT(quiclysink, "Stop. Num Packets sent: %lu. Kilobytes sent: %lu.\n", 
           quiclysink->num_packets, quiclysink->num_bytes / 1000);
-  g_print("###################### Quicly Stats ######################\n");
   
   if (quicly_close(quiclysink->conn, 0, "") != 0)
     g_printerr("Error on close. Unclean shutdown\n");

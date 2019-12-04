@@ -98,6 +98,7 @@ static int send_pending(GstQuiclysrc *quiclysrc);
 //static int receive_packet(GstQuiclysrc *quiclysink);
 //static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len);
 static int receive_packet(GstQuiclysrc *quiclysrc, GError *err);
+static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc);
 
 /* TODO: do something with that, needs to be a property */
 static const char *ticket_file = NULL;
@@ -138,7 +139,8 @@ enum
   PROP_CAPS,
   PROP_DEFAULT_BUFFER_SIZE,
   PROP_UDP_MTU,
-  PROP_QUICLY_MTU
+  PROP_QUICLY_MTU,
+  PROP_STATS
 };
 
 /* rtp header */
@@ -243,8 +245,9 @@ gst_quiclysrc_class_init (GstQuiclysrcClass * klass)
           "Maximum expected packet size of quicly packets.",
           0, G_MAXINT, QUICLY_DEFAULT_MTU,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-
-
+  g_object_class_install_property(gobject_class, PROP_STATS,
+          g_param_spec_boxed("stats", "Statistics", "Various Statistics",
+          GST_TYPE_STRUCTURE, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
@@ -381,6 +384,9 @@ gst_quiclysrc_get_property (GObject * object, guint property_id,
   GST_DEBUG_OBJECT (quiclysrc, "get_property");
 
   switch (property_id) {
+    case PROP_STATS:
+      g_value_take_boxed(value, gst_quiclysrc_create_stats(quiclysrc));
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
       break;
@@ -630,16 +636,25 @@ static int send_pending(GstQuiclysrc *quiclysrc) {
   return ret;
 }
 
-static void dump_stats(FILE *fp, quicly_conn_t *conn)
+static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc)
 {
-    quicly_stats_t stats;
+  quicly_stats_t stats;
+  quicly_get_stats(quiclysrc->conn, &stats);
+  GstStructure *s;
 
-    quicly_get_stats(conn, &stats);
-    fprintf(fp,
-            "packets-received: %" PRIu64 ", packets-sent: %" PRIu64 ", packets-lost: %" PRIu64 ", ack-received: %" PRIu64
-            ", bytes-received: %" PRIu64 ", bytes-sent: %" PRIu64 ", srtt: %" PRIu32 "\n",
-            stats.num_packets.received, stats.num_packets.sent, stats.num_packets.lost, stats.num_packets.ack_received,
-            stats.num_bytes.received, stats.num_bytes.sent, stats.rtt.smoothed);
+  s = gst_structure_new("quiclysrc-stats",
+      "packets-received", G_TYPE_UINT64, stats.num_packets.received,
+      "packets-sent", G_TYPE_UINT64, stats.num_packets.sent,
+      "packets-lost", G_TYPE_UINT64, stats.num_packets.lost,
+      "acks-received", G_TYPE_UINT64, stats.num_packets.ack_received,
+      "bytes-received", G_TYPE_UINT64, stats.num_bytes.received,
+      "bytes-sent", G_TYPE_UINT64, stats.num_bytes.sent,
+      "rtt-smoothed", G_TYPE_UINT, stats.rtt.smoothed,
+      "rtt-latest", G_TYPE_UINT, stats.rtt.latest,
+      "rtt-minimum", G_TYPE_UINT, stats.rtt.minimum,
+      "rtt-variance", G_TYPE_UINT, stats.rtt.variance, NULL);
+
+  return s;
 }
 
 static gboolean
@@ -647,14 +662,8 @@ gst_quiclysrc_stop (GstBaseSrc * src)
 {
   GstQuiclysrc *quiclysrc = GST_QUICLYSRC (src);
 
-  GST_DEBUG_OBJECT (quiclysrc, "stop");
-
-  /* Print stats */
-  g_print("###################### Quicly Stats ######################\n");
-  dump_stats(stdout, quiclysrc->conn);
-  g_print("\nQuiclysrc. Packets received: %lu. Kilobytes received: %lu\n.", 
+  GST_DEBUG_OBJECT(quiclysrc, "Stop. Packets received: %lu. Kilobytes received: %lu\n.", 
           quiclysrc->num_packets, quiclysrc->num_bytes / 1000);
-  g_print("###################### Quicly Stats ######################\n");
   
   gst_quiclysrc_free_cancellable(quiclysrc);
 
