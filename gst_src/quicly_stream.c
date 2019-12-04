@@ -631,6 +631,14 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
     GstBin *videoBin = GST_BIN(gst_bin_new("videobin"));
     GstElement *filesrc = gst_element_factory_make("filesrc", "fs");
     GstElement *rtph264pay = gst_element_factory_make("rtph264pay", "rtppay");
+    GstElement *queue2_1 = gst_element_factory_make("queue2", "queue2_1");
+    GstElement *queue2_2 = gst_element_factory_make("queue2", "queue2_2");
+
+    /* Identity element sync's on the clock and basically makes a live stream
+     * out of my filesrc. Without that, scream would not work
+     */
+    GstElement *identity = gst_element_factory_make("identity", "identity");
+    g_object_set(identity, "sync", TRUE, NULL);
     lastEle = rtph264pay;
 
     /* Choose demuxer based on video container type*/
@@ -658,7 +666,7 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
     /* Link with or without transcoding */
     if (sdata->transcode || sdata->scream) {
         GstElement *decoder = gst_element_factory_make("avdec_h264", "decode");
-        GstElement *queue = gst_element_factory_make("queue", "decode_queue");
+        //GstElement *queue = gst_element_factory_make("queue", "decode_queue");
         GstElement *encoder = gst_element_factory_make("x264enc", "video");
         /* TODO: add bitrate option */
         g_object_set(encoder, "bitrate", 2000, "tune", 4, NULL);
@@ -666,15 +674,17 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
         if (sdata->scream) {
             g_print("creating SCREAM\n");
             GstElement *scream = gst_element_factory_make("gscreamtx", "scream");
+            //GstElement *cam = gst_element_factory_make("v412src", "camsrc");
             g_object_set(scream, "media-src", 0, NULL);
-            gst_bin_add_many (videoBin, filesrc, demux, decoder, 
-                                queue, encoder, scream, rtph264pay, NULL);
-            gst_element_link_many(decoder, queue, encoder, rtph264pay, scream, NULL);
+            gst_bin_add_many (videoBin, filesrc, demux, decoder, identity,
+                                encoder, scream, rtph264pay, queue2_1, queue2_2, NULL);
+            gst_element_link_many(decoder, identity, queue2_1, encoder, queue2_2, rtph264pay, scream, NULL);
             lastEle = scream;
         } else {
             /* Second queue after encoder? */
-            gst_bin_add_many (videoBin, filesrc, demux, decoder, queue, encoder, rtph264pay, NULL);
-            gst_element_link_many(decoder, queue, encoder, rtph264pay, NULL);
+            gst_bin_add_many (videoBin, filesrc, demux, decoder, identity,
+                              queue2_1, queue2_2, encoder, rtph264pay, NULL);
+            gst_element_link_many(decoder, identity, queue2_1, encoder, queue2_2, rtph264pay, NULL);
         }
         
         if (!gst_element_link(filesrc, demux))
@@ -682,10 +692,11 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
         g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), decoder);
         
     } else {
-        gst_bin_add_many(videoBin, filesrc, demux, rtph264pay, NULL);
+        gst_bin_add_many(videoBin, filesrc, demux, identity, rtph264pay, NULL);
         if (!gst_element_link(filesrc, demux))
             g_warning("Failed to link filesrc\n");
-        g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), rtph264pay);
+        g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), identity);
+        gst_element_link_many(identity, rtph264pay, NULL);
     }
 
     if (sdata->debug) {
@@ -810,6 +821,12 @@ int run_server(AppData *sdata)
         gst_structure_free(stats);
         g_free(str);
     }
+
+    gint64 rate;
+    g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "queue2_1"), "avg-in-rate", &rate, NULL);
+    g_print("##### Rate queue2_1 (Mbit/s): %lu\n", rate / 125000);
+    g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "queue2_2"), "avg-in-rate", &rate, NULL);
+    g_print("##### Rate queue2_2 (Mbit/s): %lu\n", rate / 125000);
 
     if (sdata->debug)
         g_print("Num buffers at sink: %i. Num bytes: %u\n", num_buffers, num_bytes);
