@@ -33,7 +33,7 @@ const quicly_context_t quicly_spec_context = {
         30 * 1000,                                           /* idle_timeout (30 seconds) */
         100,                                                 /* max_concurrent_streams_bidi */
         0,                                                    /* max_concurrent_streams_uni */
-        1200                                                    /* max dgram size */
+        1200                                                    /* max_datagram_frame_size */
     },
     0, /* enforce_version_negotiation */
     0, /* is_clustered */

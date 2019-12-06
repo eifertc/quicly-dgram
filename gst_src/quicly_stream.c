@@ -49,6 +49,7 @@ typedef struct _AppData
     gboolean udp;
     gboolean aux;
     gboolean scream;
+    gboolean camera;
     GstElement *jitterbuf;
 } AppData;
 
@@ -255,6 +256,7 @@ cb_state_change(GstBus *bus, GstMessage *msg, gpointer data)
 
 static GstPadProbeReturn cb_udp_first_packet(GstPad *pad, GstPadProbeInfo *info, gpointer data)
 {
+    g_print("Received first packet\n");
     udp_timeout = TRUE;
 
     return GST_PAD_PROBE_REMOVE;
@@ -371,10 +373,17 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
     return GST_PAD_PROBE_OK;
 }
 
-/* Feedback data from quicly. Forward to encoder or congestion control */
-static void cb_on_feedback_report(GstElement *ele, guint32 lrtt, guint32 srtt, guint64 sent, guint64 lost, gpointer user_data)
+/* Feedback data from quicly. Forward to encoder or congestion control 
+ * TODO: Report only the newly lost ones.
+ */ 
+static void 
+cb_on_feedback_report(GstElement *ele, guint32 minrtt, guint32 lrtt, guint32 srtt, 
+                      guint32 cwnd, guint64 bytes_in_flight, guint64 bytes_sent,
+                      guint64 bytes_lost, guint64 bytes_acked,
+                      guint64 packets_sent, guint64 packets_lost, 
+                      guint64 packets_acked, gpointer user_data)
 {
-    return;
+    g_print("cwnd: %lu\n", bytes_acked);
 }
 
 static void on_pad_added(GstElement *ele, GstPad *pad, gpointer data)
@@ -582,7 +591,7 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
         if (sdata->stream_mode)
             g_object_set(rtpSink, "stream-mode", TRUE, NULL);
 
-        if (sdata->transcode || sdata->scream) {
+        if (sdata->debug) {
             g_signal_connect(rtpSink, "on-feedback-report", G_CALLBACK(cb_on_feedback_report), NULL);
         }
     }
@@ -676,6 +685,10 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
             GstElement *scream = gst_element_factory_make("gscreamtx", "scream");
             //GstElement *cam = gst_element_factory_make("v412src", "camsrc");
             g_object_set(scream, "media-src", 0, NULL);
+
+            if (!sdata->udp)
+                g_object_set(scream, "quic", TRUE, NULL);
+
             gst_bin_add_many (videoBin, filesrc, demux, decoder, identity,
                                 encoder, scream, rtph264pay, queue2_1, queue2_2, NULL);
             gst_element_link_many(decoder, identity, queue2_1, encoder, queue2_2, rtph264pay, scream, NULL);
@@ -823,10 +836,17 @@ int run_server(AppData *sdata)
     }
 
     gint64 rate;
-    g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "queue2_1"), "avg-in-rate", &rate, NULL);
-    g_print("##### Rate queue2_1 (Mbit/s): %lu\n", rate / 125000);
-    g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "queue2_2"), "avg-in-rate", &rate, NULL);
-    g_print("##### Rate queue2_2 (Mbit/s): %lu\n", rate / 125000);
+    GstElement *qu;
+    if ((qu = gst_bin_get_by_name(GST_BIN(pipe), "queue2_1")) != NULL) {
+        g_object_get(qu, "avg-in-rate", &rate, NULL);
+        g_print("##### Rate queue2_1 (Mbit/s): %lu\n", rate / 125000);
+        gst_object_unref(qu);
+    }
+    if ((qu = gst_bin_get_by_name(GST_BIN(pipe), "queue2_2")) != NULL) {
+        g_object_get(qu, "avg-in-rate", &rate, NULL);
+        g_print("##### Rate queue2_2 (Mbit/s): %lu\n", rate / 125000);
+        gst_object_unref(qu);
+    }
 
     if (sdata->debug)
         g_print("Num buffers at sink: %i. Num bytes: %u\n", num_buffers, num_bytes);
@@ -919,6 +939,7 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
         sink = gst_element_factory_make("fakesink", "sink");
     } else {
         sink = gst_element_factory_make("glimagesink", "sink");
+        g_object_set(sink, "sync", FALSE, "async", FALSE, NULL);
     }
 
     if (!bin || !depay || !decoder || !sink || !queue) {
@@ -926,8 +947,10 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
         return NULL;
     }
 
-    if (cdata->scream) {
+    /* TODO: If using quic with feedback, don't use the screamrx element */
+    if (cdata->scream && cdata->udp) {
         GstElement *scream = gst_element_factory_make("gscreamrx", "scream");
+
         gst_bin_add_many(bin, scream, depay, decoder, sink, NULL);
         gst_element_link_many(scream, depay, decoder, sink, NULL);
         ghostSink = scream;
@@ -1061,6 +1084,7 @@ int main (int argc, char *argv[])
     data.rtcp = FALSE;
     data.aux = FALSE;
     data.scream = FALSE;
+    data.camera = FALSE;
     data.file_path = NULL;
     data.cert_file = NULL;
     data.key_file = NULL;
@@ -1137,7 +1161,7 @@ int main (int argc, char *argv[])
 
     /* handle different modes */
     if (data.scream) {
-        data.rtcp = TRUE;
+        data.rtcp = data.udp ? TRUE : FALSE;
         data.aux = FALSE;
         data.transcode = TRUE;
     }

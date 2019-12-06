@@ -173,8 +173,10 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT] =
     g_signal_new("on-feedback-report", G_TYPE_FROM_CLASS(klass),
     G_SIGNAL_RUN_LAST, G_STRUCT_OFFSET(GstQuiclysinkClass, on_feedback_report),
-    NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 4,
-    G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT64, G_TYPE_UINT64);
+    NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 11,
+    G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT,
+    G_TYPE_UINT64, G_TYPE_UINT64, G_TYPE_UINT64, G_TYPE_UINT64,
+    G_TYPE_UINT64, G_TYPE_UINT64, G_TYPE_UINT64);
 
   gobject_class->set_property = gst_quiclysink_set_property;
   gobject_class->get_property = gst_quiclysink_get_property;
@@ -559,15 +561,18 @@ typedef struct {
     uint32_t ssrc;
 } rtp_hdr_;
 
-/* emit feedback signal
- * TODO: Implement dedicated function in quicly.c instead of the memcpy one
+/* 
+ * Emit feedback signal to application
  */
 inline static void emit_feedback_signal(GstQuiclysink *quiclysink)
 {
-  quicly_stats_t stats;
-  quicly_get_stats(quiclysink->conn, &stats);
+  /* get quicly feedback */
+  quicly_get_feedback(quiclysink->conn, &quiclysink->feedback);
   g_signal_emit(quiclysink, quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT], 0,
-    stats.rtt.latest, stats.rtt.smoothed, stats.num_packets.sent, stats.num_packets.lost);
+    quiclysink->feedback.rtt_minimum, quiclysink->feedback.rtt_smoothed, 
+    quiclysink->feedback.rtt_latest, quiclysink->feedback.cwnd, quiclysink->feedback.bytes_in_flight,
+    quiclysink->feedback.bytes_sent, quiclysink->feedback.bytes_lost, quiclysink->feedback.bytes_acked,
+    quiclysink->feedback.packets_sent, quiclysink->feedback.packets_lost, quiclysink->feedback.packets_acked);
 }
 
 /* TODO: Use only one function. e.g. call the same function from render and
@@ -620,7 +625,9 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
       // use ret NOT rret
   }
 
-  //emit_feedback_signal(quiclysink);
+  /* Emit feedback every ~10ms */
+  if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > 50)
+    emit_feedback_signal(quiclysink);
 
   return GST_FLOW_OK;
 }
@@ -690,7 +697,9 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
       // use ret NOT rret
   }
 
-  //emit_feedback_signal(quiclysink);
+  /* Emit feedback every ~10ms */
+  if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > 50)
+    emit_feedback_signal(quiclysink);
 
   return flow;
 }

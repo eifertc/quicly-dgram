@@ -78,7 +78,8 @@ struct _GstQuiclysink
 
   gboolean stream_mode;
 
-  //quicly_stats_t quicly_stats;
+  gint64 fb_timeout; /* reference time for feedback signal emit */
+  quicly_feedback_t feedback;
 };
 
 struct _GstQuiclysinkClass

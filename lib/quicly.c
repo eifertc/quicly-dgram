@@ -885,6 +885,23 @@ ptls_t *quicly_get_tls(quicly_conn_t *conn)
     return conn->crypto.tls;
 }
 
+int quicly_get_feedback(quicly_conn_t *conn, quicly_feedback_t *fb)
+{
+    fb->rtt_minimum = conn->egress.loss.rtt.minimum;
+    fb->rtt_smoothed = conn->egress.loss.rtt.smoothed;
+    fb->rtt_latest = conn->egress.loss.rtt.latest;
+    fb->cwnd = conn->egress.cc.cwnd;
+    fb->bytes_in_flight = conn->egress.sentmap.bytes_in_flight;
+    fb->bytes_sent = conn->super.stats.num_bytes.sent;
+    fb->bytes_lost = conn->super.stats.num_bytes.lost;
+    fb->packets_sent = conn->super.stats.num_packets.sent;
+    fb->packets_lost = conn->super.stats.num_packets.lost;
+    fb->packets_acked = conn->super.stats.num_packets.ack_received;
+    fb->bytes_acked = conn->super.stats.num_bytes.acked;
+
+    return 0;
+}
+
 int quicly_get_stats(quicly_conn_t *conn, quicly_stats_t *stats)
 {
     /* copy the pre-built stats fields */
@@ -2762,6 +2779,7 @@ static int do_detect_loss(quicly_loss_t *ld, uint64_t largest_acked, uint32_t de
         if (sent->bytes_in_flight != 0 && conn->egress.max_lost_pn <= sent->packet_number) {
             if (sent->packet_number != largest_newly_lost_pn) {
                 ++conn->super.stats.num_packets.lost;
+                conn->super.stats.num_bytes.lost += sent->bytes_in_flight;
                 largest_newly_lost_pn = sent->packet_number;
                 quicly_cc_on_lost(&conn->egress.cc, sent->bytes_in_flight, sent->packet_number, conn->egress.packet_number);
                 LOG_CONNECTION_EVENT(conn, QUICLY_EVENT_TYPE_QUICTRACE_LOST, INT_EVENT_ATTR(PACKET_NUMBER, largest_newly_lost_pn));
@@ -3562,6 +3580,7 @@ static int handle_ack_frame(quicly_conn_t *conn, struct st_quicly_handle_payload
                 const quicly_sent_packet_t *sent;
                 if ((sent = quicly_sentmap_get(&iter))->packet_number == packet_number) {
                     ++conn->super.stats.num_packets.ack_received;
+                    conn->super.stats.num_bytes.acked += sent->bytes_in_flight;
                     if (state->epoch == sent->ack_epoch) {
                         largest_newly_acked.packet_number = packet_number;
                         largest_newly_acked.sent_at = sent->sent_at;

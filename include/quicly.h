@@ -469,6 +469,8 @@ struct st_quicly_conn_streamgroup_state_t {
     struct {                                                                                                                       \
         uint64_t received;                                                                                                         \
         uint64_t sent;                                                                                                             \
+        uint64_t lost;                                                                                                             \
+        uint64_t acked;                                                                                                            \
     } num_bytes
 
 typedef struct st_quicly_stats_t {
@@ -481,6 +483,20 @@ typedef struct st_quicly_stats_t {
      */
     quicly_rtt_t rtt;
 } quicly_stats_t;
+
+typedef struct st_quicly_feedback_t {
+    uint32_t rtt_minimum;
+    uint32_t rtt_smoothed;
+    uint32_t rtt_latest;
+    uint32_t cwnd;
+    size_t bytes_in_flight;
+    uint64_t bytes_sent;
+    uint64_t bytes_lost;
+    uint64_t bytes_acked;
+    uint64_t packets_sent;
+    uint64_t packets_lost;
+    uint64_t packets_acked;
+} quicly_feedback_t;
 
 /**
  * The state of the default stream scheduler.
@@ -805,6 +821,11 @@ static quicly_stream_id_t quicly_get_peer_next_stream_id(quicly_conn_t *conn, in
  *
  */
 static void quicly_get_peername(quicly_conn_t *conn, struct sockaddr **sa, socklen_t *salen);
+/**
+ * Report feedback to the application
+ */
+int quicly_get_feedback(quicly_conn_t *conn, quicly_feedback_t *fb);
+
 /**
  *
  */
