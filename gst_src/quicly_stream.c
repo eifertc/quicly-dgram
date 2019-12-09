@@ -778,7 +778,10 @@ int run_server(AppData *sdata)
     gst_bus_add_signal_watch(bus);
     gst_object_unref (bus);
 
-    rtpBin = gst_element_factory_make("rtpbin", "rtpbin");
+    if ((rtpBin = gst_element_factory_make("rtpbin", "rtpbin")) == NULL) {
+        g_print("Could not create RtpBin.\n");
+        return -1;
+    }
     g_object_set(rtpBin, "rtp-profile", GST_RTP_PROFILE_AVPF, NULL);
 
     gst_bin_add (GST_BIN (pipe), rtpBin);
@@ -1108,19 +1111,19 @@ int main (int argc, char *argv[])
         {"file", 'f', 0, G_OPTION_ARG_STRING, &data.file_path,
          "Server. Video file path", NULL},
         {"cert", 'c', 0, G_OPTION_ARG_STRING, &data.cert_file,
-         "Server. Certificate file path", NULL},
+         "Server (Quic). Certificate file path", NULL},
         {"key", 'k', 0, G_OPTION_ARG_STRING, &data.key_file,
-         "Server. Key file path", NULL},
+         "Server (Quic). Key file path", NULL},
         {"plugin-path", 'P', 0, G_OPTION_ARG_STRING, &plugins,
          "custom plugin folder", NULL},
         {"stream_mode", 'm', 0, G_OPTION_ARG_NONE, &data.stream_mode,
-         "Server. Use streams instead of datagrams", NULL},
+         "Server (Quic). Use streams instead of datagrams", NULL},
         {"debug", 'd', 0, G_OPTION_ARG_NONE, &data.debug,
          "Print debug info", NULL},
         {"host", 'h', 0, G_OPTION_ARG_STRING, &data.host,
          "Host to connect to.", NULL},
         {"port", 'p', 0, G_OPTION_ARG_INT, &data.port,
-         "Client. Port to connect to", NULL},
+         "Port to connect to", NULL},
         {"headless", 'H', 0, G_OPTION_ARG_NONE, &data.headless,
          "Client. Use fakesink", NULL},
         {"logfile", 'l', 0, G_OPTION_ARG_STRING, &data.logfile,

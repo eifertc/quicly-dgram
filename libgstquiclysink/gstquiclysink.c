@@ -107,6 +107,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define DEFAULT_CERTIFICATE       NULL
 #define DEFAULT_PRIVATE_KEY       NULL
 #define DEFAULT_STREAM_MODE       FALSE
+#define DEFAULT_AUTO_CAPS_EXCHANGE FALSE
 
 /* properties */
 enum
@@ -118,7 +119,8 @@ enum
   PROP_PRIVATE_KEY,
   PROP_QUICLY_MTU,
   PROP_STREAM_MODE,
-  PROP_STATS
+  PROP_STATS,
+  PROP_AUTO_CAPS_EXCHANGE
 };
 
 /* signals */
@@ -187,8 +189,7 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   base_sink_class->stop = GST_DEBUG_FUNCPTR (gst_quiclysink_stop);
   //base_sink_class->event = GST_DEBUG_FUNCPTR (gst_quiclysink_event);
   
-  /* Uncomment to enable auto caps exchange via quic stream */
-  //base_sink_class->set_caps = GST_DEBUG_FUNCPTR (gst_quiclysink_set_caps);
+  base_sink_class->set_caps = GST_DEBUG_FUNCPTR (gst_quiclysink_set_caps);
   base_sink_class->render = GST_DEBUG_FUNCPTR (gst_quiclysink_render);
   base_sink_class->render_list = GST_DEBUG_FUNCPTR (gst_quiclysink_render_list);
 
@@ -216,6 +217,9 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   g_object_class_install_property(gobject_class, PROP_STATS,
                                   g_param_spec_boxed("stats", "Statistics", "Various Statistics",
                                   GST_TYPE_STRUCTURE, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property(gobject_class, PROP_AUTO_CAPS_EXCHANGE,
+                                  g_param_spec_boolean("capEx", "CapExchange", "Auto cap exchange",
+                                  DEFAULT_AUTO_CAPS_EXCHANGE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
@@ -228,8 +232,9 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->num_packets = 0;
   quiclysink->num_bytes = 0;
   quiclysink->silent = TRUE;
-  quiclysink->stream_mode = FALSE;
+  quiclysink->stream_mode = DEFAULT_STREAM_MODE;
   quiclysink->received_caps_ack = FALSE;
+  quiclysink->auto_caps_exchange = DEFAULT_AUTO_CAPS_EXCHANGE;
 
   /* Setup quicly and tls context */
   quiclysink->tlsctx.random_bytes = ptls_openssl_random_bytes;
@@ -317,8 +322,10 @@ gst_quiclysink_set_property (GObject * object, guint property_id,
         quiclysink->key = g_value_dup_string(value);
       break;
     case PROP_STREAM_MODE:
-      quiclysink->stream_mode = TRUE;
+      quiclysink->stream_mode = g_value_get_boolean(value);
       break;
+    case PROP_AUTO_CAPS_EXCHANGE:
+      quiclysink->auto_caps_exchange = g_value_get_boolean(value);
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
       break;
@@ -337,6 +344,8 @@ gst_quiclysink_get_property (GObject * object, guint property_id,
     case PROP_STATS:
       g_value_take_boxed(value, gst_quiclysink_create_stats(quiclysink));
       break;
+    case PROP_AUTO_CAPS_EXCHANGE:
+      g_value_set_boolean(value, quiclysink->auto_caps_exchange);
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
       break;
@@ -845,6 +854,10 @@ static gboolean gst_quiclysink_set_caps (GstBaseSink *sink, GstCaps *caps)
 {
   GstQuiclysink *quiclysink = GST_QUICLYSINK (sink);
   GST_LOG_OBJECT (quiclysink, "Caps set: %s", gst_caps_to_string(caps));
+  
+  if (!quiclysink->auto_caps_exchange)
+    return TRUE;
+
   int ret = -1;
   if (quiclysink->caps)
     gst_caps_unref(caps);

@@ -80,6 +80,8 @@ struct _GstQuiclysink
 
   gint64 fb_timeout; /* reference time for feedback signal emit */
   quicly_feedback_t feedback;
+
+  gboolean auto_caps_exchange;
 };
 
 struct _GstQuiclysinkClass

@@ -3283,8 +3283,10 @@ int quicly_send(quicly_conn_t *conn, quicly_datagram_t **packets, size_t *num_pa
         quicly_sentmap_iter_t iter;
 
         init_acks_iter(conn, &iter);
-        if (quicly_sentmap_get(&iter)->packet_number == UINT64_MAX)
+        if (quicly_sentmap_get(&iter)->packet_number == UINT64_MAX) {
+            printf("Error free connection\n");
             return QUICLY_ERROR_FREE_CONNECTION;
+        }
         
         if (conn->super.state == QUICLY_STATE_CLOSING && conn->egress.send_ack_at <= now) {
             destroy_all_streams(conn, 0, 0); /* delayed until the emission of CONNECTION_CLOSE frame to allow quicly_close to be
