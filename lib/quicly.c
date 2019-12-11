@@ -2240,11 +2240,15 @@ static int _do_allocate_frame(quicly_conn_t *conn, quicly_send_context_t *s, siz
         s->dst_end += s->target.cipher->aead->algo->tag_size; /* restore the AEAD tag size (tag size can differ bet. epochs) */
         s->target.cipher = s->current.cipher;
     } else {
-        if (s->num_packets >= s->max_packets)
+        if (s->num_packets >= s->max_packets) {
+            printf("ERROR SENDBUF FULL 1\n");
             return QUICLY_ERROR_SENDBUF_FULL;
+        }
         s->send_window = round_send_window(s->send_window);
-        if (ack_eliciting && s->send_window < (ssize_t)min_space)
+        if (ack_eliciting && s->send_window < (ssize_t)min_space) {
+            printf("ERROR sendwindow: %lu\n", s->send_window);
             return QUICLY_ERROR_SENDBUF_FULL;
+        }
         if ((s->target.packet = conn->super.ctx->packet_allocator->alloc_packet(
                  conn->super.ctx->packet_allocator, conn->super.peer.salen, conn->super.ctx->max_packet_size)) == NULL)
             return PTLS_ERROR_NO_MEMORY;
@@ -2628,15 +2632,19 @@ int _quicly_send_dgram(quicly_conn_t *conn, quicly_send_context_t *s)
         header[0] = QUICLY_FRAME_TYPE_DGRAM;
     }
     /* I want to put the entire datagram packet in one frame, so min size includes payload */
-    if ((ret = allocate_ack_eliciting_frame(conn, s, hp - header + 1 + size, &sent, on_ack_dgram)) != 0) 
+    if ((ret = allocate_ack_eliciting_frame(conn, s, hp - header + 1 + size, &sent, on_ack_dgram)) != 0) {
+        //printf("Allocate ack ELICITING FRAME\n");
         return ret;
+    }
 
     frame_type_at = s->dst;
     memcpy(s->dst, header, hp - header);
     s->dst += hp - header;
     capacity = s->dst_end - s->dst;
-    if (capacity > conn->egress.max_data.permitted - conn->egress.max_data.sent)
+    if (capacity > conn->egress.max_data.permitted - conn->egress.max_data.sent) {
+        printf("FLOW CONTROLED. BAD REMOVE\n");
         capacity = conn->egress.max_data.permitted - conn->egress.max_data.sent;
+    }
 
     /* write payload */
     assert(capacity != 0);
@@ -2669,8 +2677,8 @@ int _quicly_send_dgram(quicly_conn_t *conn, quicly_send_context_t *s)
 }
 
 int quicly_send_dgram(quicly_conn_t *conn, quicly_send_context_t *s)
-{
-    if (conn->dgram == NULL)
+
+{    if (conn->dgram == NULL)
         return 0;
     
     int ret = 0;
@@ -3175,6 +3183,7 @@ static int do_send(quicly_conn_t *conn, quicly_send_context_t *s)
 
     s->send_window = calc_send_window(conn, min_packets_to_send * conn->super.ctx->max_packet_size, restrict_sending);
     if (s->send_window == 0) {
+        printf("SEND WINDOW IS 0\n");
         ret = 0;
         goto Exit;
     }
@@ -3239,8 +3248,10 @@ static int do_send(quicly_conn_t *conn, quicly_send_context_t *s)
             quicly_linklist_unlink(&stream->_send_aux.pending_link.control);
         }
         /* send DGRAM frames */
-        if ((ret = quicly_send_dgram(conn, s)) != 0)
+        if ((ret = quicly_send_dgram(conn, s)) != 0) {
+            //printf("DGRAM SEND != 0\n");
             goto Exit;
+        }
 
         /* send STREAM frames */
         if ((ret = conn->super.ctx->stream_scheduler->do_send(conn->super.ctx->stream_scheduler, conn, s)) != 0)

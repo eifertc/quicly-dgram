@@ -302,6 +302,7 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
                                   ((uint64_t)1 << QUICLY_EVENT_TYPE_CRYPTO_HANDSHAKE) |
                                   ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_ACK_RECEIVED) |
                                   ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_CONGESTION) |
+                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_ACKED) |
                                   ((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_LOST);
                                   //((uint64_t)1 << QUICLY_EVENT_TYPE_PTO) |
                          //((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_ACKED);
@@ -598,6 +599,9 @@ static int receive_packet(GstQuiclysrc *quiclysrc, GError *err)
     off += plen;
   }
 
+  // TODO: Find better solution
+  send_pending(quiclysrc);
+
   return 0;
 }
 
@@ -612,22 +616,26 @@ static int send_pending(GstQuiclysrc *quiclysrc) {
   do {
     num_packets = sizeof(packets) / sizeof(packets[0]);
     if ((ret = quicly_send(quiclysrc->conn, packets, &num_packets)) == 0) {
-      addr = g_socket_address_new_from_native(&packets[0]->sa,
-                                               packets[0]->salen);
-      if (!addr) {
-        g_printerr("Could not convert to native address in send\n");
-        return -1;
-      }
-      for (i = 0; i != num_packets; ++i) {
-        if ((rret = g_socket_send_to(quiclysrc->socket, addr, 
-                                    (gchar *)packets[i]->data.base,
-                                    packets[i]->data.len,
-                                    quiclysrc->cancellable, &err)) < 0) {
-          g_printerr("Send to failed. Error: %s\n", err->message);
-          err = NULL;
+
+      if (num_packets > 0) {
+        addr = g_socket_address_new_from_native(&packets[0]->sa,
+                                                 packets[0]->salen);
+        if (!addr) {
+          g_printerr("Could not convert to native address in send\n");
+          return -1;
         }
-        quicly_packet_allocator_t *pa = quiclysrc->ctx.packet_allocator;
-        pa->free_packet(pa, packets[i]);
+
+        for (i = 0; i != num_packets; ++i) {
+          if ((rret = g_socket_send_to(quiclysrc->socket, addr, 
+                                      (gchar *)packets[i]->data.base,
+                                      packets[i]->data.len,
+                                      quiclysrc->cancellable, &err)) < 0) {
+            g_printerr("Send to failed. Error: %s\n", err->message);
+            err = NULL;
+          }
+          quicly_packet_allocator_t *pa = quiclysrc->ctx.packet_allocator;
+          pa->free_packet(pa, packets[i]);
+        }
       }
     }
   } while(ret == 0 && num_packets == sizeof(packets) / sizeof(packets[0]));

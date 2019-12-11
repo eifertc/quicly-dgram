@@ -279,6 +279,7 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
                          //((uint64_t)1 << QUICLY_EVENT_TYPE_PTO) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_SEND) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_SEND) |
+                         //((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_ACKED) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_TEST) |
                          ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_LOST);
   
@@ -529,6 +530,9 @@ gst_quiclysink_stop (GstBaseSink * sink)
   GST_DEBUG_OBJECT(quiclysink, "Stop. Num Packets sent: %lu. Kilobytes sent: %lu.\n", 
           quiclysink->num_packets, quiclysink->num_bytes / 1000);
   
+  g_print("Stop. Num Packets sent: %lu. Kilobytes sent: %lu.\n", 
+          quiclysink->num_packets, quiclysink->num_bytes / 1000);
+
   if (quicly_close(quiclysink->conn, 0, "") != 0)
     g_printerr("Error on close. Unclean shutdown\n");
 

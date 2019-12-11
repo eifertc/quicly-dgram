@@ -47,6 +47,7 @@ typedef struct _AppData
     gboolean transcode;
     gboolean debug;
     gboolean udp;
+    gboolean tcp;
     gboolean aux;
     gboolean scream;
     gboolean camera;
@@ -97,6 +98,12 @@ inline uint64_t get_time() {
     struct timeval t;
     gettimeofday(&t, NULL);
     return t.tv_sec * (int)1e6 + t.tv_usec;
+}
+
+gboolean timer_stat_event(GstClock *clock, GstClockTime t, GstClockID id, gpointer user_data) 
+{
+
+    return TRUE;
 }
 
 //static void on_stream_status(GstBus *bus, GstMessage *msg, gpointer user_data)
@@ -383,7 +390,7 @@ cb_on_feedback_report(GstElement *ele, guint32 minrtt, guint32 lrtt, guint32 srt
                       guint64 packets_sent, guint64 packets_lost, 
                       guint64 packets_acked, gpointer user_data)
 {
-    g_print("cwnd: %lu\n", bytes_acked);
+    g_print("Bytes_in_flight: %lu. Cwnd: %lu\n", bytes_in_flight, cwnd);
 }
 
 static void on_pad_added(GstElement *ele, GstPad *pad, gpointer data)
@@ -799,6 +806,15 @@ int run_server(AppData *sdata)
         //g_signal_connect(int_session, "on_send_rtcp", G_CALLBACK(cb_on_send_rtcp), NULL);
     }
 
+    /* Gather statistics periodically */
+    /*
+    GstClockID clockId;
+    GstClock *clock = gst_pipeline_get_clock((GstPipeline*) pipe);
+    clockId = gst_clock_new_periodic_id(clock, gst_clock_get_internal_time(clock), PACE_CLOCK_T_NS);
+    g_assert(filter->clockId);
+    GstClockReturn t = gst_clock_id_wait_async(clockId, timer_stat_event, (gpointer) int_session, NULL);
+    */
+
     /* start the pipeline */
     g_print("Stream started...\n");
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_PLAYING);
@@ -1026,6 +1042,11 @@ int run_client(AppData *cdata)
     videoSession = make_client_video_session(0, cdata);
     add_client_stream(GST_ELEMENT(pipe), rtpBin, videoSession, cdata);
 
+    GstElement *session;
+    g_signal_emit_by_name(rtpBin, "get-session", 0, &session);
+    GObject *int_session;
+    g_signal_emit_by_name(rtpBin, "get-internal-session", 0, &int_session);
+
     /* start the pipeline */
     //g_print("APPLICATION THREAD ID: %ld\n", pthread_self());
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_PLAYING);
@@ -1044,6 +1065,40 @@ int run_client(AppData *cdata)
         g_print("##### Jitterbuffer stats:\n%s\n", str);
         gst_structure_free(stats);
         g_free(str);
+
+        //g_object_get(session, "stats", &stats, NULL);
+        //str = gst_structure_to_string(stats);
+        //g_print("##### RTPSession stats:\n%s\n", str);
+        //gst_structure_free(stats);
+        //g_free(str);
+
+        GValueArray *arr = NULL;
+        g_object_get(int_session, "sources", &arr, NULL);
+
+        GValue *val;
+        gboolean internal;
+        if (arr) {
+            for (int i = 0; i < arr->n_values; i++) {
+                GObject *rtpsrc;
+
+                val = g_value_array_get_nth(arr, i);
+                rtpsrc = g_value_get_object(val);
+                g_object_get(rtpsrc, "stats", &stats, NULL);
+
+                gst_structure_get_boolean(stats, "internal", &internal);
+                if (!internal) {
+                    guint jitter;
+                    guint64 bitrate;
+                    gst_structure_get_uint(stats, "jitter", &jitter);
+                    gst_structure_get_uint64(stats, "bitrate", &bitrate);
+
+                    g_print("##### RTPSrc Nr.%i stats:\n", i);
+                    g_print("Bitrate: %luKbit/s. Jitter: %ums\n", bitrate/1000, jitter);
+
+                    gst_structure_free(stats);
+                }
+            }
+        }
     }
 
     if(!cdata->udp) {
@@ -1083,6 +1138,7 @@ int main (int argc, char *argv[])
     data.debug = FALSE;
     data.stream_mode = FALSE;
     data.udp = FALSE;
+    data.tcp = FALSE;
     data.transcode = FALSE;
     data.rtcp = FALSE;
     data.aux = FALSE;
@@ -1100,8 +1156,10 @@ int main (int argc, char *argv[])
     GOptionEntry entries[] = {
         {"scream", 's', 0, G_OPTION_ARG_NONE, &data.scream,
          "Use rmcat scream cc. Default: False", NULL},
-        {"udp", 'u', 0, G_OPTION_ARG_NONE, &data.udp,
+        {"udp", 'U', 0, G_OPTION_ARG_NONE, &data.udp,
          "Use udp transport. Default: Quic.", NULL},
+        {"tcp", 'T', 0, G_OPTION_ARG_NONE, &data.tcp,
+         "Use tcp transport. Default: Quic.", NULL},
         {"rtcp", 'r', 0, G_OPTION_ARG_NONE, &data.rtcp,
          "Enable RTCP messages. Default: False.", NULL},
         {"aux", 'a', 0, G_OPTION_ARG_NONE, &data.aux,
