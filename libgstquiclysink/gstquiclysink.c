@@ -69,6 +69,8 @@ static GstFlowReturn gst_quiclysink_render_list (GstBaseSink * bsink,
     GstBufferList * buffer_list);
 
 static int save_ticket_cb(ptls_save_ticket_t *_self, ptls_t *tls, ptls_iovec_t src);
+static int on_client_hello_cb(ptls_on_client_hello_t *_self, ptls_t *tls, ptls_on_client_hello_parameters_t *params);
+
 static void on_closed_by_peer(quicly_closed_by_peer_t *self, quicly_conn_t *conn, int err, uint64_t frame_type, const char *reason,
                               size_t reason_len);
 static int on_dgram_open(quicly_dgram_open_t *self, quicly_dgram_t *dgram);
@@ -82,10 +84,38 @@ static int receive_packet(GstQuiclysink *quiclysink);
 static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len);
 static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink);
 
-static const char *ticket_file = NULL;
+static const char *session_file = NULL;
+
+/* POSSIBLY NOT NEEDED */
+/*
+static struct {
+    ptls_aead_context_t *enc, *dec;
+} address_token_aead;
+static int on_generate_resumption_token(quicly_generate_resumption_token_t *self, quicly_conn_t *conn, ptls_buffer_t *buf,
+                                        quicly_address_token_plaintext_t *token)
+{
+  GstQuiclysink *quiclysink = GST_QUICLYSINK (*quicly_get_data(conn));
+  return quicly_encrypt_address_token(quiclysink->tlsctx.random_bytes, address_token_aead.enc, buf, buf->off, token);
+}
+
+static int save_resumption_token_cb(quicly_save_resumption_token_t *_self, quicly_conn_t *conn, ptls_iovec_t token)
+{
+  free(session_info.address_token.base);
+  session_info.address_token = ptls_iovec_init(malloc(token.len), token.len);
+  memcpy(session_info.address_token.base, token.base, token.len);
+
+  return save_session(quicly_get_peer_transport_parameters(conn));
+}
+
+static quicly_generate_resumption_token_t generate_resumption_token = {&on_generate_resumption_token};
+static quicly_save_resumption_token_t save_resumption_token = {save_resumption_token_cb};
+*/
 
 /* cb */
 static ptls_save_ticket_t save_ticket = {save_ticket_cb};
+static ptls_on_client_hello_t on_client_hello = {on_client_hello_cb};
+
+
 static quicly_dgram_open_t dgram_open = {&on_dgram_open};
 static quicly_stream_open_t stream_open = {&on_stream_open};
 static quicly_closed_by_peer_t closed_by_peer = {&on_closed_by_peer};
@@ -243,12 +273,18 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->tlsctx.cipher_suites = ptls_openssl_cipher_suites;
   quiclysink->tlsctx.require_dhe_on_psk = 1;
   quiclysink->tlsctx.save_ticket = &save_ticket;
+  quiclysink->tlsctx.on_client_hello = &on_client_hello;
 
   quiclysink->ctx = quicly_spec_context;
   quiclysink->ctx.tls = &quiclysink->tlsctx;
   quiclysink->ctx.stream_open = &stream_open;
   quiclysink->ctx.dgram_open = &dgram_open;
   quiclysink->ctx.closed_by_peer = &closed_by_peer;
+  //quiclysink->ctx.save_resumption_token = &save_resumption_token;
+  //quiclysink->ctx.generate_resumption_token = &generate_resumption_token;
+
+  quiclysink->ctx.save_resumption_token = NULL;
+  quiclysink->ctx.generate_resumption_token = NULL;
 
   setup_session_cache(quiclysink->ctx.tls);
   quicly_amend_ptls_context(quiclysink->ctx.tls);
@@ -257,34 +293,23 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->key_exchanges[0] = &ptls_openssl_secp256r1;
   quiclysink->cid_key = malloc(sizeof(gchar) * 17);
   quiclysink->tlsctx.random_bytes(quiclysink->cid_key, sizeof(*quiclysink->cid_key) - 1);
+
+  // NEW. What is THAT?
+  /*
+  uint8_t secret[PTLS_MAX_DIGEST_SIZE];
+  quiclysink->tlsctx.random_bytes(secret, ptls_openssl_sha256.digest_size);
+  address_token_aead.enc = ptls_aead_new(&ptls_openssl_aes128gcm, &ptls_openssl_sha256, 1, secret, "");
+  address_token_aead.dec = ptls_aead_new(&ptls_openssl_aes128gcm, &ptls_openssl_sha256, 0, secret, "");
+  */
+
   quiclysink->ctx.cid_encryptor = quicly_new_default_cid_encryptor(
-                                  &ptls_openssl_bfecb, &ptls_openssl_sha256,
+                                  &ptls_openssl_bfecb, &ptls_openssl_aes128ecb, &ptls_openssl_sha256,
                                   ptls_iovec_init(quiclysink->cid_key,
                                   strlen(quiclysink->cid_key)));
-
-
-  quiclysink->ctx.event_log.cb = quicly_new_default_event_logger(stderr);
-  quiclysink->ctx.event_log.mask = UINT64_MAX;
-  
-  quiclysink->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_CONGESTION) |
-                         //((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAMS_BLOCKED_SEND) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_DATA_BLOCKED_SEND) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAMS_BLOCKED_RECEIVE) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_DATA_BLOCKED_SEND) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_DATA_BLOCKED_RECEIVE) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_STREAM_DATA_RECEIVE) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_RECEIVE) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_SEND) |
-                         //((uint64_t)1 << QUICLY_EVENT_TYPE_PTO) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_SEND) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_SEND) |
-                         //((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_ACKED) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_TEST) |
-                         ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_LOST);
   
   quiclysink->conn = NULL;
   quiclysink->dgram = NULL;
+  quiclysink->fb_timeout = quiclysink->ctx.now->cb(quiclysink->ctx.now);
   /* -------- end context init --------------*/
 
   quiclysink->recv_buf = malloc(sizeof(gchar) * (2048 + 1));
@@ -527,11 +552,15 @@ gst_quiclysink_stop (GstBaseSink * sink)
 {
   GstQuiclysink *quiclysink = GST_QUICLYSINK (sink);
 
-  GST_DEBUG_OBJECT(quiclysink, "Stop. Num Packets sent: %lu. Kilobytes sent: %lu.\n", 
-          quiclysink->num_packets, quiclysink->num_bytes / 1000);
+  GST_DEBUG_OBJECT(quiclysink, 
+          "Stop. Num Packets sent: %lu. Kilobytes sent: %lu. Packets left in buffer: %lu\n", 
+          quiclysink->num_packets, quiclysink->num_bytes / 1000,
+          quicly_dgram_debug(quiclysink->dgram));
   
   g_print("Stop. Num Packets sent: %lu. Kilobytes sent: %lu.\n", 
           quiclysink->num_packets, quiclysink->num_bytes / 1000);
+
+  //g_print("PACKETS IN BUFFER: %lu\n", quicly_dgram_debug(quiclysink->dgram));
 
   if (quicly_close(quiclysink->conn, 0, "") != 0)
     g_printerr("Error on close. Unclean shutdown\n");
@@ -580,12 +609,16 @@ typedef struct {
 inline static void emit_feedback_signal(GstQuiclysink *quiclysink)
 {
   /* get quicly feedback */
+  quiclysink->fb_timeout = quiclysink->ctx.now->cb(quiclysink->ctx.now);
   quicly_get_feedback(quiclysink->conn, &quiclysink->feedback);
+  //g_print("Bytes_in_flight: %lu. Cwnd: %u\n", quiclysink->feedback.bytes_in_flight, quiclysink->feedback.cwnd);
+  /*
   g_signal_emit(quiclysink, quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT], 0,
     quiclysink->feedback.rtt_minimum, quiclysink->feedback.rtt_smoothed, 
     quiclysink->feedback.rtt_latest, quiclysink->feedback.cwnd, quiclysink->feedback.bytes_in_flight,
     quiclysink->feedback.bytes_sent, quiclysink->feedback.bytes_lost, quiclysink->feedback.bytes_acked,
     quiclysink->feedback.packets_sent, quiclysink->feedback.packets_lost, quiclysink->feedback.packets_acked);
+  */
 }
 
 /* TODO: Use only one function. e.g. call the same function from render and
@@ -733,6 +766,16 @@ static int receive_packet(GstQuiclysink *quiclysink)
     return -1;
   }
   off = 0;
+
+  /* TODO: Remove sockaddr cast by using recvfrom */
+  /* Convert GSocketAddress to native */
+  struct sockaddr native_sa;
+  gssize len = g_socket_address_get_native_size(in_addr);
+  if (!g_socket_address_to_native(in_addr, &native_sa, len, &err)) {
+    g_printerr("Could not convert GSocketAddress to native. Error: %s\n", err->message);
+    g_object_unref(in_addr);
+    return -1;
+  }
   while (off != rret) {
     quicly_decoded_packet_t packet;
     plen = quicly_decode_packet(&quiclysink->ctx, &packet, 
@@ -741,22 +784,15 @@ static int receive_packet(GstQuiclysink *quiclysink)
     if (plen == SIZE_MAX)
       break;
     if (quiclysink->conn != NULL) {
-      quicly_receive(quiclysink->conn, &packet);
+      quicly_receive(quiclysink->conn, NULL, &native_sa, &packet);
     } else if (QUICLY_PACKET_IS_LONG_HEADER(packet.octets.base[0])) {
-      struct sockaddr native_sa;
-      socklen_t salen;
+      
       /* TODO: handle unbound connection */
       /* TODO: handle packet.token in quicly_accept */
 
-      /* Convert GSocketAddress to native */
-      gssize len = g_socket_address_get_native_size(in_addr);
-      if (!g_socket_address_to_native(in_addr, &native_sa, len, &err)) {
-        g_printerr("Could not convert GSocketAddress to native. Error: %s\n", err->message);
-        return -1;
-      }
-      salen = sizeof(native_sa);
-      if (quicly_accept(&quiclysink->conn, &quiclysink->ctx, 
-                          &native_sa, salen, &packet, ptls_iovec_init(NULL, 0),
+      quicly_address_token_plaintext_t *token = NULL;
+      if (quicly_accept(&quiclysink->conn, &quiclysink->ctx, NULL,
+                          &native_sa, &packet, token,
                           &quiclysink->next_cid, NULL) == 0) {
         if (quiclysink->conn == NULL) {
           g_printerr("Quicly accept returned success but conn is NULL\n");
@@ -779,6 +815,7 @@ static int receive_packet(GstQuiclysink *quiclysink)
     }
     off += plen;
   }
+  g_object_unref(in_addr);
   return 0;
 }
 
@@ -802,7 +839,6 @@ static int send_pending(GstQuiclysink *quiclysink)
   do {
       num_packets = sizeof(packets) / sizeof(packets[0]);
       if ((ret = quicly_send(quiclysink->conn, packets, &num_packets)) == 0) {
-
         for (i = 0; i != num_packets; ++i) {
           if ((rret = g_socket_send_to(quiclysink->socket, quiclysink->conn_addr, 
                                        (gchar *)packets[i]->data.base, 
@@ -927,6 +963,7 @@ static int on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream)
     return 0;
 }
 
+/* TODO: Check */
 static void on_closed_by_peer(quicly_closed_by_peer_t *self, quicly_conn_t *conn, int err, uint64_t frame_type, const char *reason,
                               size_t reason_len)
 {
@@ -955,6 +992,12 @@ static int on_receive_reset(quicly_stream_t *stream, int err)
     return 0;
 }
 
+static int on_client_hello_cb(ptls_on_client_hello_t *_self, ptls_t *tls, ptls_on_client_hello_parameters_t *params)
+{
+  g_print("on_client_hello_cb. TODO\n");
+  return 0;
+}
+
 int save_ticket_cb(ptls_save_ticket_t *_self, ptls_t *tls, ptls_iovec_t src)
 {
     quicly_conn_t *conn = *ptls_get_data_ptr(tls);
@@ -962,7 +1005,7 @@ int save_ticket_cb(ptls_save_ticket_t *_self, ptls_t *tls, ptls_iovec_t src)
     FILE *fp = NULL;
     int ret;
 
-    if (ticket_file == NULL)
+    if (session_file == NULL)
         return 0;
 
     ptls_buffer_init(&buf, "", 0);
@@ -970,13 +1013,13 @@ int save_ticket_cb(ptls_save_ticket_t *_self, ptls_t *tls, ptls_iovec_t src)
     /* build data (session ticket and transport parameters) */
     ptls_buffer_push_block(&buf, 2, { ptls_buffer_pushv(&buf, src.base, src.len); });
     ptls_buffer_push_block(&buf, 2, {
-        if ((ret = quicly_encode_transport_parameter_list(&buf, 1, quicly_get_peer_transport_parameters(conn), NULL, NULL)) != 0)
+        if ((ret = quicly_encode_transport_parameter_list(&buf, 1, quicly_get_peer_transport_parameters(conn), NULL, NULL, 0)) != 0)
             goto Exit;
     });
 
     /* write file */
-    if ((fp = fopen(ticket_file, "wb")) == NULL) {
-        fprintf(stderr, "failed to open file:%s:%s\n", ticket_file, strerror(errno));
+    if ((fp = fopen(session_file, "wb")) == NULL) {
+        fprintf(stderr, "failed to open file:%s:%s\n", session_file, strerror(errno));
         ret = PTLS_ERROR_LIBRARY;
         goto Exit;
     }

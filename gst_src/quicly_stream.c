@@ -176,7 +176,7 @@ static void
 cb_eos(GstBus *bus, GstMessage *message, gpointer data)
 {
     GMainLoop *loop = (GMainLoop *) data;
-    g_print("End of Stream.");
+    g_print("End of Stream.\n");
     g_main_loop_quit (loop);
 }
 
@@ -390,7 +390,7 @@ cb_on_feedback_report(GstElement *ele, guint32 minrtt, guint32 lrtt, guint32 srt
                       guint64 packets_sent, guint64 packets_lost, 
                       guint64 packets_acked, gpointer user_data)
 {
-    g_print("Bytes_in_flight: %lu. Cwnd: %lu\n", bytes_in_flight, cwnd);
+    g_print("Bytes_in_flight: %lu. Cwnd: %u\n", bytes_in_flight, cwnd);
 }
 
 static void on_pad_added(GstElement *ele, GstPad *pad, gpointer data)

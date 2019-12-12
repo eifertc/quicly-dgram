@@ -22,7 +22,6 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
-#include <quicly/streambuf.h>
 #include "quicly/streambuf.h"
 
 void quicly_sendbuf_dispose(quicly_sendbuf_t *sb)
@@ -116,6 +115,7 @@ static void discard_raw(quicly_sendbuf_vec_t *vec)
     free(vec->cbdata);
 }
 
+/* TODO: Move that to application side */
 int quicly_sendbuf_write_rtp_framing(quicly_stream_t *stream, quicly_sendbuf_t *sb, const void *src, size_t len)
 {
     static const quicly_streambuf_sendvec_callbacks_t raw_callbacks = {flatten_raw, discard_raw};

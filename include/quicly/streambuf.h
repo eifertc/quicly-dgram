@@ -169,6 +169,7 @@ void quicly_dgrambuf_shift(quicly_dgram_listbuf_t *b, size_t delta);
 int quicly_dgrambuf_emit(quicly_dgram_listbuf_t *b, void *dst, size_t *len);
 static size_t quicly_dgram_can_get_data(quicly_dgram_t *dgram);
 static size_t quicly_dgram_can_send(quicly_dgram_t *dgram);
+static size_t quicly_dgram_debug(quicly_dgram_t *dgram);
 
 inline size_t quicly_dgram_can_get_data(quicly_dgram_t *dgram)
 {
@@ -196,6 +197,20 @@ inline size_t quicly_dgram_can_send(quicly_dgram_t *dgram)
     }
 }
 
+/* TODO: REMOVE */
+inline size_t quicly_dgram_debug(quicly_dgram_t *dgram)
+{
+    if (dgram == NULL)
+        return 0;
+    
+    quicly_dgrambuf_t *bf = (quicly_dgrambuf_t *)dgram->data;
+    if (bf->egress.vecs.size > 0) {
+        return bf->egress.vecs.size;
+    } else {
+        return 0;
+    }
+}
+
 /* inline definitions */
 
 inline void quicly_dgrambuf_init(quicly_dgram_listbuf_t *db)
@@ -203,6 +218,7 @@ inline void quicly_dgrambuf_init(quicly_dgram_listbuf_t *db)
     memset(db, 0, sizeof(*db));
 }
 
+/* inline definitions */
 inline void quicly_sendbuf_init(quicly_sendbuf_t *sb)
 {
     memset(sb, 0, sizeof(*sb));

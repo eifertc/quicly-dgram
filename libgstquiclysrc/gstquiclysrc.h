@@ -63,6 +63,8 @@ struct _GstQuiclysrc
   ptls_context_t tlsctx;
   ptls_key_exchange_algorithm_t *key_exchanges[128];
 
+  ptls_iovec_t resumption_token;
+
   /* quicly receive */
   quicly_dgram_t *dgram;
   quicly_stream_t *stream;

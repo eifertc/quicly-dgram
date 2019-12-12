@@ -70,9 +70,9 @@ extern "C" {
 #define QUICLY_MAX_STREAM_DATA_FRAME_CAPACITY (1 + 8 + 8)
 #define QUICLY_MAX_STREAMS_FRAME_CAPACITY (1 + 8)
 #define QUICLY_PING_FRAME_CAPACITY 1
-#define QUICLY_RST_FRAME_CAPACITY (1 + 8 + 2 + 8)
+#define QUICLY_RST_FRAME_CAPACITY (1 + 8 + 8 + 8)
 #define QUICLY_STREAMS_BLOCKED_FRAME_CAPACITY (1 + 8)
-#define QUICLY_STOP_SENDING_FRAME_CAPACITY (1 + 8 + 2)
+#define QUICLY_STOP_SENDING_FRAME_CAPACITY (1 + 8 + 8)
 #define QUICLY_ACK_MAX_GAPS 256
 #define QUICLY_ACK_FRAME_CAPACITY (1 + 8 + 8 + 1 + 8)
 #define QUICLY_PATH_CHALLENGE_FRAME_CAPACITY (1 + 8)
@@ -195,6 +195,7 @@ static int quicly_decode_streams_blocked_frame(const uint8_t **src, const uint8_
 
 typedef struct st_quicly_new_connection_id_frame_t {
     uint64_t sequence;
+    uint64_t retire_prior_to;
     ptls_iovec_t cid;
     const uint8_t *stateless_reset_token;
 } quicly_new_connection_id_frame_t;
@@ -225,7 +226,7 @@ typedef struct st_quicly_ack_frame_t {
 int quicly_decode_ack_frame(const uint8_t **src, const uint8_t *end, quicly_ack_frame_t *frame, int is_ack_ecn);
 
 static size_t quicly_new_token_frame_capacity(ptls_iovec_t token);
-static uint8_t *quicly_encode_new_token_frame(uint8_t *dst, const uint8_t *dst_end, ptls_iovec_t token);
+static uint8_t *quicly_encode_new_token_frame(uint8_t *dst, ptls_iovec_t token);
 
 typedef struct st_quicly_new_token_frame_t {
     ptls_iovec_t token;
@@ -472,18 +473,20 @@ inline uint8_t *quicly_encode_rst_stream_frame(uint8_t *dst, uint64_t stream_id,
 {
     *dst++ = QUICLY_FRAME_TYPE_RESET_STREAM;
     dst = quicly_encodev(dst, stream_id);
-    dst = quicly_encode16(dst, app_error_code);
+    dst = quicly_encodev(dst, app_error_code);
     dst = quicly_encodev(dst, final_offset);
     return dst;
 }
 
 inline int quicly_decode_reset_stream_frame(const uint8_t **src, const uint8_t *end, quicly_reset_stream_frame_t *frame)
 {
+    uint64_t error_code;
+
     if ((frame->stream_id = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
-    if (end - *src < 2)
+    if ((error_code = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
-    frame->app_error_code = quicly_decode16(src);
+    frame->app_error_code = (uint16_t)error_code;
     frame->final_offset = quicly_decodev(src, end);
     return 0;
 Error:
@@ -492,11 +495,11 @@ Error:
 
 inline int quicly_decode_application_close_frame(const uint8_t **src, const uint8_t *end, quicly_application_close_frame_t *frame)
 {
-    uint64_t reason_len;
+    uint64_t error_code, reason_len;
 
-    if (end - *src < 2)
+    if ((error_code = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
-    frame->error_code = quicly_decode16(src);
+    frame->error_code = (uint16_t)error_code;
     if ((reason_len = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
     if ((uint64_t)(end - *src) < reason_len)
@@ -510,11 +513,11 @@ Error:
 
 inline int quicly_decode_transport_close_frame(const uint8_t **src, const uint8_t *end, quicly_transport_close_frame_t *frame)
 {
-    uint64_t reason_len;
+    uint64_t error_code, reason_len;
 
-    if (end - *src < 2)
+    if ((error_code = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
-    frame->error_code = quicly_decode16(src);
+    frame->error_code = (uint16_t)error_code;
     if ((frame->frame_type = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
     if ((reason_len = quicly_decodev(src, end)) == UINT64_MAX)
@@ -572,6 +575,8 @@ inline int quicly_decode_max_streams_frame(const uint8_t **src, const uint8_t *e
 {
     if ((frame->count = quicly_decodev(src, end)) == UINT64_MAX)
         return QUICLY_TRANSPORT_ERROR_FRAME_ENCODING;
+    if (frame->count > (uint64_t)1 << 60)
+        return QUICLY_TRANSPORT_ERROR_FRAME_ENCODING;
     return 0;
 }
 
@@ -618,6 +623,8 @@ inline int quicly_decode_streams_blocked_frame(const uint8_t **src, const uint8_
 {
     if ((frame->count = quicly_decodev(src, end)) == UINT64_MAX)
         return QUICLY_TRANSPORT_ERROR_FRAME_ENCODING;
+    if (frame->count > (uint64_t)1 << 60)
+        return QUICLY_TRANSPORT_ERROR_FRAME_ENCODING;
     return 0;
 }
 
@@ -625,6 +632,8 @@ inline int quicly_decode_new_connection_id_frame(const uint8_t **src, const uint
 {
     /* sequence */
     if ((frame->sequence = quicly_decodev(src, end)) == UINT64_MAX)
+        goto Fail;
+    if ((frame->retire_prior_to = quicly_decodev(src, end)) == UINT64_MAX)
         goto Fail;
     if (end - *src < 1)
         goto Fail;
@@ -656,17 +665,19 @@ inline uint8_t *quicly_encode_stop_sending_frame(uint8_t *dst, uint64_t stream_i
 {
     *dst++ = QUICLY_FRAME_TYPE_STOP_SENDING;
     dst = quicly_encodev(dst, stream_id);
-    dst = quicly_encode16(dst, app_error_code);
+    dst = quicly_encodev(dst, app_error_code);
     return dst;
 }
 
 inline int quicly_decode_stop_sending_frame(const uint8_t **src, const uint8_t *end, quicly_stop_sending_frame_t *frame)
 {
+    uint64_t error_code;
+
     if ((frame->stream_id = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
-    if (end - *src < 2)
+    if ((error_code = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
-    frame->app_error_code = quicly_decode16(src);
+    frame->app_error_code = (uint16_t)error_code;
     return 0;
 Error:
     return QUICLY_TRANSPORT_ERROR_FRAME_ENCODING;
@@ -677,7 +688,7 @@ inline size_t quicly_new_token_frame_capacity(ptls_iovec_t token)
     return 1 + quicly_encodev_capacity(token.len) + token.len;
 }
 
-inline uint8_t *quicly_encode_new_token_frame(uint8_t *dst, const uint8_t *dst_end, ptls_iovec_t token)
+inline uint8_t *quicly_encode_new_token_frame(uint8_t *dst, ptls_iovec_t token)
 {
     *dst++ = QUICLY_FRAME_TYPE_NEW_TOKEN;
     dst = quicly_encodev(dst, token.len);
@@ -690,6 +701,8 @@ inline int quicly_decode_new_token_frame(const uint8_t **src, const uint8_t *end
 {
     uint64_t token_len;
     if ((token_len = quicly_decodev(src, end)) == UINT64_MAX)
+        goto Error;
+    if (token_len == 0)
         goto Error;
     if ((uint64_t)(end - *src) < token_len)
         goto Error;

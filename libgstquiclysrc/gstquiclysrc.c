@@ -86,6 +86,7 @@ static gboolean gst_quiclysrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * q
 
 /* quicly prototypes */
 static int save_ticket_cb(ptls_save_ticket_t *_self, ptls_t *tls, ptls_iovec_t src);
+static int on_client_hello_cb(ptls_on_client_hello_t *_self, ptls_t *tls, ptls_on_client_hello_parameters_t *params);
 static void on_closed_by_peer(quicly_closed_by_peer_t *self, quicly_conn_t *conn, int err, uint64_t frame_type, const char *reason,
                               size_t reason_len);
 static int on_dgram_open(quicly_dgram_open_t *self, quicly_dgram_t *dgram);
@@ -100,10 +101,17 @@ static int send_pending(GstQuiclysrc *quiclysrc);
 static int receive_packet(GstQuiclysrc *quiclysrc, GError *err);
 static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc);
 
-/* TODO: do something with that, needs to be a property */
-static const char *ticket_file = NULL;
+static const char *session_file = NULL;
+
+/* TODO NEW API STUFF */
+/*
+static struct {
+    ptls_aead_context_t *enc, *dec;
+} address_token_aead;
+*/
 
 /* quicly callbacks */
+static ptls_on_client_hello_t on_client_hello = {on_client_hello_cb};
 static ptls_save_ticket_t save_ticket = {save_ticket_cb};
 static quicly_dgram_open_t dgram_open = {&on_dgram_open};
 static quicly_stream_open_t stream_open = {&on_stream_open};
@@ -275,6 +283,7 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
   quiclysrc->tlsctx.cipher_suites = ptls_openssl_cipher_suites;
   quiclysrc->tlsctx.require_dhe_on_psk = 1;
   quiclysrc->tlsctx.save_ticket = &save_ticket;
+  quiclysrc->tlsctx.on_client_hello = &on_client_hello;
 
   quiclysrc->ctx = quicly_spec_context;
   quiclysrc->ctx.tls = &quiclysrc->tlsctx;
@@ -287,25 +296,6 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
 
   /* key exchange */
   quiclysrc->key_exchanges[0] = &ptls_openssl_secp256r1;
-
-  quiclysrc->ctx.event_log.cb = quicly_new_default_event_logger(stderr);
-  //_ctx->event_log.mask = UINT64_MAX;
-  quiclysrc->ctx.event_log.mask = ((uint64_t)1 << QUICLY_EVENT_TYPE_PACKET_LOST) | 
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_RECEIVE) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_APPLICATION_CLOSE_RECEIVE) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_DATA_BLOCKED_RECEIVE) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_SEND) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_DATA_RECEIVE) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAM_DATA_BLOCKED_RECEIVE) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_MAX_STREAM_DATA_RECEIVE) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_STREAMS_BLOCKED_RECEIVE) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_CRYPTO_HANDSHAKE) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_ACK_RECEIVED) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_CC_CONGESTION) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_ACKED) |
-                                  ((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_LOST);
-                                  //((uint64_t)1 << QUICLY_EVENT_TYPE_PTO) |
-                         //((uint64_t)1 << QUICLY_EVENT_TYPE_DGRAM_ACKED);
 
   quiclysrc->conn = NULL;
   quiclysrc->dgram = NULL;
@@ -511,8 +501,6 @@ gst_quiclysrc_start (GstBaseSrc * src)
     g_printerr("Could not convert GSocketAddress to native. Error: %s\n", err->message);
     return FALSE;
   }
-  socklen_t salen = sizeof(native_sa);
-
 
   /* Quicly connect */
   int64_t timeout_at;
@@ -524,8 +512,9 @@ gst_quiclysrc_start (GstBaseSrc * src)
   if ((ret = quicly_connect(&quiclysrc->conn, &quiclysrc->ctx,
                             quiclysrc->host,
                             &native_sa,
-                            salen,
+                            NULL,
                             &quiclysrc->next_cid,
+                            quiclysrc->resumption_token,
                             &quiclysrc->hs_properties,
                             &quiclysrc->resumed_transport_params)) != 0) {
     g_printerr("Quicly connect failed\n");
@@ -577,13 +566,22 @@ static int receive_packet(GstQuiclysrc *quiclysrc, GError *err)
 {
   gssize rret;
   size_t off, plen;
+  GSocketAddress *in_addr;
+  struct sockaddr native_sa;
 
-  if ((rret = g_socket_receive_from(quiclysrc->socket, NULL, 
+  if ((rret = g_socket_receive_from(quiclysrc->socket, &in_addr, 
                                     quiclysrc->recv_buf,
                                     quiclysrc->recv_buf_size,
                                     quiclysrc->cancellable,
                                     &err)) < 0) {
     g_printerr("Error receiving from socket: %s\n", err->message);
+    return -1;
+  }
+  /* TODO: REMOVE THAT CONVERSION, best by using recvfrom directly instead of the g_socket variant? */
+  gssize len = g_socket_address_get_native_size(in_addr);
+  if (!g_socket_address_to_native(in_addr, &native_sa, len, &err)) {
+    g_printerr("Could not convert GSocketAddress to native. Error: %s\n", err->message);
+    g_object_unref(in_addr);
     return -1;
   }
   off = 0;
@@ -594,10 +592,12 @@ static int receive_packet(GstQuiclysrc *quiclysrc, GError *err)
                                 rret - off);
     if (plen == SIZE_MAX)
       break;
-    quicly_receive(quiclysrc->conn, &packet);
+    quicly_receive(quiclysrc->conn, NULL, &native_sa, &packet);
   
     off += plen;
   }
+
+  g_object_unref(in_addr);
 
   // TODO: Find better solution
   send_pending(quiclysrc);
@@ -618,8 +618,8 @@ static int send_pending(GstQuiclysrc *quiclysrc) {
     if ((ret = quicly_send(quiclysrc->conn, packets, &num_packets)) == 0) {
 
       if (num_packets > 0) {
-        addr = g_socket_address_new_from_native(&packets[0]->sa,
-                                                 packets[0]->salen);
+        addr = g_socket_address_new_from_native(&packets[0]->dest.sa,
+                                                 quicly_get_socklen(&packets[0]->dest.sa));
         if (!addr) {
           g_printerr("Could not convert to native address in send\n");
           return -1;
@@ -717,10 +717,8 @@ gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
 
   GST_DEBUG_OBJECT (quiclysrc, "fill");
 
-  if (quiclysrc->transport_close) {
-    g_print("END OF STREAM\n");
+  if (quiclysrc->transport_close)
     return GST_FLOW_EOS;
-  }
 
   GstMapInfo info;
   GError *err = NULL;
@@ -1032,6 +1030,12 @@ static int on_stop_sending(quicly_stream_t *stream, int err)
     return 0;
 }
 
+static int on_client_hello_cb(ptls_on_client_hello_t *_self, ptls_t *tls, ptls_on_client_hello_parameters_t *params)
+{
+  g_print("on_client_hello_cb. TODO\n");
+  return 0;
+}
+
 static int on_receive_reset(quicly_stream_t *stream, int err)
 {
     assert(QUICLY_ERROR_IS_QUIC_APPLICATION(err));
@@ -1046,7 +1050,7 @@ int save_ticket_cb(ptls_save_ticket_t *_self, ptls_t *tls, ptls_iovec_t src)
     FILE *fp = NULL;
     int ret;
 
-    if (ticket_file == NULL)
+    if (session_file == NULL)
         return 0;
 
     ptls_buffer_init(&buf, "", 0);
@@ -1054,13 +1058,13 @@ int save_ticket_cb(ptls_save_ticket_t *_self, ptls_t *tls, ptls_iovec_t src)
     /* build data (session ticket and transport parameters) */
     ptls_buffer_push_block(&buf, 2, { ptls_buffer_pushv(&buf, src.base, src.len); });
     ptls_buffer_push_block(&buf, 2, {
-        if ((ret = quicly_encode_transport_parameter_list(&buf, 1, quicly_get_peer_transport_parameters(conn), NULL, NULL)) != 0)
+        if ((ret = quicly_encode_transport_parameter_list(&buf, 1, quicly_get_peer_transport_parameters(conn), NULL, NULL, 0)) != 0)
             goto Exit;
     });
 
     /* write file */
-    if ((fp = fopen(ticket_file, "wb")) == NULL) {
-        fprintf(stderr, "failed to open file:%s:%s\n", ticket_file, strerror(errno));
+    if ((fp = fopen(session_file, "wb")) == NULL) {
+        fprintf(stderr, "failed to open file:%s:%s\n", session_file, strerror(errno));
         ret = PTLS_ERROR_LIBRARY;
         goto Exit;
     }

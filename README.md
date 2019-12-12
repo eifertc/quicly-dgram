@@ -12,6 +12,10 @@ quiclysink and quiclysrc
 Including gstreamer application for testing purposes
 quicly_stream
 
+quicly
+===
+
+Quicly is a QUIC implementation, written from the ground up to be used within the H2O HTTP server.
 
 The software is licensed under the MIT License.
 
@@ -19,6 +23,7 @@ How to build
 ---
 
 ```
+% git submodule update --init --recursive
 % mkdir build && cd build
 % cmake ..
 % make

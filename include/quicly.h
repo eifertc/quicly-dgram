@@ -26,6 +26,7 @@
 extern "C" {
 #endif
 
+#include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -36,6 +37,7 @@ extern "C" {
 #include "quicly/frame.h"
 #include "quicly/linklist.h"
 #include "quicly/loss.h"
+#include "quicly/cc.h"
 #include "quicly/recvstate.h"
 #include "quicly/sendstate.h"
 #include "quicly/maxsender.h"
@@ -46,149 +48,40 @@ extern "C" {
 
 /* invariants! */
 #define QUICLY_LONG_HEADER_BIT 0x80
+#define QUICLY_QUIC_BIT 0x40
+#define QUICLY_KEY_PHASE_BIT 0x4
+#define QUICLY_LONG_HEADER_RESERVED_BITS 0xc
+#define QUICLY_SHORT_HEADER_RESERVED_BITS 0x18
+
+#define QUICLY_PACKET_TYPE_INITIAL (QUICLY_LONG_HEADER_BIT | QUICLY_QUIC_BIT | 0)
+#define QUICLY_PACKET_TYPE_0RTT (QUICLY_LONG_HEADER_BIT | QUICLY_QUIC_BIT | 0x10)
+#define QUICLY_PACKET_TYPE_HANDSHAKE (QUICLY_LONG_HEADER_BIT | QUICLY_QUIC_BIT | 0x20)
+#define QUICLY_PACKET_TYPE_RETRY (QUICLY_LONG_HEADER_BIT | QUICLY_QUIC_BIT | 0x30)
+#define QUICLY_PACKET_TYPE_BITMASK 0xf0
+
 #define QUICLY_PACKET_IS_LONG_HEADER(first_byte) (((first_byte)&QUICLY_LONG_HEADER_BIT) != 0)
 
-#define QUICLY_PROTOCOL_VERSION 0xff000014
+#define QUICLY_PROTOCOL_VERSION 0xff000018
 
-#define QUICLY_MAX_CID_LEN 18
+#define QUICLY_PACKET_IS_INITIAL(first_byte) (((first_byte)&0xf0) == 0xc0)
+
+#define QUICLY_MAX_CID_LEN_V1 20
 #define QUICLY_STATELESS_RESET_TOKEN_LEN 16
 #define QUICLY_STATELESS_RESET_PACKET_MIN_LEN 39
 
+#define QUICLY_MAX_PN_SIZE 4  /* maximum defined by the RFC used for calculating header protection sampling offset */
+#define QUICLY_SEND_PN_SIZE 2 /* size of PN used for sending */
+
+typedef union st_quicly_address_t {
+    struct sockaddr sa;
+    struct sockaddr_in sin;
+    struct sockaddr_in6 sin6;
+} quicly_address_t;
+
 typedef struct st_quicly_datagram_t {
     ptls_iovec_t data;
-    socklen_t salen;
-    struct sockaddr sa;
+    quicly_address_t dest, src;
 } quicly_datagram_t;
-
-/**
- * Event types used for logging.
- *
- * CONNECT, ACCEPT, SEND, RECEIVE are major events that correspond to the external functions of quicly (e.g. quicly_connect).
- * Timestamp, CID, first-octet, etc. are included as attributes.
- *
- * The rest are minor (i.e. in-detail) events. They are categorized by prefix (e.g., "PACKET", "CC"). They do not contain timestamp
- * or CID. The time and the connection can be determined by the major event that precedes the minor event.
- */
-typedef enum en_quicly_event_type_t {
-    QUICLY_EVENT_TYPE_CONNECT,
-    QUICLY_EVENT_TYPE_ACCEPT,
-    QUICLY_EVENT_TYPE_SEND,
-    QUICLY_EVENT_TYPE_SEND_STATELESS_RESET,
-    QUICLY_EVENT_TYPE_RECEIVE,
-    QUICLY_EVENT_TYPE_FREE,
-    QUICLY_EVENT_TYPE_IDLE_TIMEOUT,
-    QUICLY_EVENT_TYPE_PACKET_PREPARE,
-    QUICLY_EVENT_TYPE_PACKET_COMMIT,
-    QUICLY_EVENT_TYPE_PACKET_ACKED,
-    QUICLY_EVENT_TYPE_PACKET_LOST,
-    QUICLY_EVENT_TYPE_CRYPTO_DECRYPT,
-    QUICLY_EVENT_TYPE_CRYPTO_HANDSHAKE,
-    QUICLY_EVENT_TYPE_CRYPTO_UPDATE_SECRET,
-    QUICLY_EVENT_TYPE_PTO,
-    QUICLY_EVENT_TYPE_CC_ACK_RECEIVED,
-    QUICLY_EVENT_TYPE_CC_CONGESTION,
-    QUICLY_EVENT_TYPE_STREAM_SEND,
-    QUICLY_EVENT_TYPE_STREAM_RECEIVE,
-    QUICLY_EVENT_TYPE_STREAM_ACKED,
-    QUICLY_EVENT_TYPE_STREAM_LOST,
-    QUICLY_EVENT_TYPE_MAX_DATA_SEND,
-    QUICLY_EVENT_TYPE_MAX_DATA_RECEIVE,
-    QUICLY_EVENT_TYPE_DATA_BLOCKED_SEND,
-    QUICLY_EVENT_TYPE_DATA_BLOCKED_RECEIVE,
-    QUICLY_EVENT_TYPE_MAX_STREAM_DATA_SEND,
-    QUICLY_EVENT_TYPE_MAX_STREAM_DATA_RECEIVE,
-    QUICLY_EVENT_TYPE_STREAM_DATA_BLOCKED_SEND,
-    QUICLY_EVENT_TYPE_STREAM_DATA_BLOCKED_RECEIVE,
-    QUICLY_EVENT_TYPE_MAX_STREAMS_SEND,
-    QUICLY_EVENT_TYPE_MAX_STREAMS_RECEIVE,
-    QUICLY_EVENT_TYPE_STREAMS_BLOCKED_SEND,
-    QUICLY_EVENT_TYPE_STREAMS_BLOCKED_RECEIVE,
-    QUICLY_EVENT_TYPE_QUIC_VERSION_SWITCH,
-    QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_SEND,
-    QUICLY_EVENT_TYPE_APPLICATION_CLOSE_SEND,
-    QUICLY_EVENT_TYPE_TRANSPORT_CLOSE_RECEIVE,
-    QUICLY_EVENT_TYPE_APPLICATION_CLOSE_RECEIVE,
-    QUICLY_EVENT_TYPE_STATELESS_RESET_RECEIVE,
-    QUICLY_EVENT_TYPE_QUICTRACE_SEND,
-    QUICLY_EVENT_TYPE_QUICTRACE_RECV,
-    QUICLY_EVENT_TYPE_QUICTRACE_LOST,
-    QUICLY_EVENT_TYPE_QUICTRACE_SEND_STREAM,
-    QUICLY_EVENT_TYPE_QUICTRACE_RECV_STREAM,
-    QUICLY_EVENT_TYPE_QUICTRACE_RECV_ACK,
-    QUICLY_EVENT_TYPE_QUICTRACE_CC_ACK,
-    QUICLY_EVENT_TYPE_QUICTRACE_CC_LOST,
-    QUICLY_EVENT_TYPE_DGRAM_SEND,
-    QUICLY_EVENT_TYPE_DGRAM_ACKED,
-    QUICLY_EVENT_TYPE_DGRAM_RECEIVED,
-    QUICLY_EVENT_TYPE_DGRAM_LOST,
-    QUICLY_EVENT_TYPE_TEST,
-} quicly_event_type_t;
-
-/**
- * an array of event names corresponding to quicly_event_type_t
- */
-extern const char *quicly_event_type_names[];
-
-typedef enum en_quicly_event_attribute_type_t {
-    QUICLY_EVENT_ATTRIBUTE_NULL,
-    QUICLY_EVENT_ATTRIBUTE_TYPE_INT_MIN,
-    QUICLY_EVENT_ATTRIBUTE_TIME = QUICLY_EVENT_ATTRIBUTE_TYPE_INT_MIN,
-    QUICLY_EVENT_ATTRIBUTE_EPOCH,
-    QUICLY_EVENT_ATTRIBUTE_PACKET_TYPE,
-    QUICLY_EVENT_ATTRIBUTE_PACKET_NUMBER,
-    QUICLY_EVENT_ATTRIBUTE_PACKET_SIZE,
-    QUICLY_EVENT_ATTRIBUTE_CONNECTION,
-    QUICLY_EVENT_ATTRIBUTE_TLS_ERROR,
-    QUICLY_EVENT_ATTRIBUTE_OFFSET,
-    QUICLY_EVENT_ATTRIBUTE_LENGTH,
-    QUICLY_EVENT_ATTRIBUTE_STREAM_ID,
-    QUICLY_EVENT_ATTRIBUTE_FIN,
-    QUICLY_EVENT_ATTRIBUTE_LIMIT,
-    QUICLY_EVENT_ATTRIBUTE_UNIDIRECTIONAL,
-    QUICLY_EVENT_ATTRIBUTE_IS_ENC,
-    QUICLY_EVENT_ATTRIBUTE_ENC_LEVEL,
-    QUICLY_EVENT_ATTRIBUTE_QUIC_VERSION,
-    QUICLY_EVENT_ATTRIBUTE_ACK_ONLY,
-    QUICLY_EVENT_ATTRIBUTE_MAX_LOST_PN,
-    QUICLY_EVENT_ATTRIBUTE_END_OF_RECOVERY,
-    QUICLY_EVENT_ATTRIBUTE_BYTES_IN_FLIGHT,
-    QUICLY_EVENT_ATTRIBUTE_CWND,
-    QUICLY_EVENT_ATTRIBUTE_NUM_PTO,
-    QUICLY_EVENT_ATTRIBUTE_NEWLY_ACKED,
-    QUICLY_EVENT_ATTRIBUTE_FIRST_OCTET,
-    QUICLY_EVENT_ATTRIBUTE_CC_END_OF_RECOVERY,
-    QUICLY_EVENT_ATTRIBUTE_CC_EXIT_RECOVERY,
-    QUICLY_EVENT_ATTRIBUTE_ACKED_PACKETS,
-    QUICLY_EVENT_ATTRIBUTE_ACKED_BYTES,
-    QUICLY_EVENT_ATTRIBUTE_MIN_RTT,
-    QUICLY_EVENT_ATTRIBUTE_SMOOTHED_RTT,
-    QUICLY_EVENT_ATTRIBUTE_LATEST_RTT,
-    QUICLY_EVENT_ATTRIBUTE_STATE,
-    QUICLY_EVENT_ATTRIBUTE_ERROR_CODE,
-    QUICLY_EVENT_ATTRIBUTE_FRAME_TYPE,
-    QUICLY_EVENT_ATTRIBUTE_ACK_BLOCK_BEGIN,
-    QUICLY_EVENT_ATTRIBUTE_ACK_BLOCK_END,
-    QUICLY_EVENT_ATTRIBUTE_ACK_DELAY,
-    QUICLY_EVENT_ATTRIBUTE_TYPE_INT_MAX,
-    QUICLY_EVENT_ATTRIBUTE_TYPE_VEC_MIN = QUICLY_EVENT_ATTRIBUTE_TYPE_INT_MAX,
-    QUICLY_EVENT_ATTRIBUTE_DCID = QUICLY_EVENT_ATTRIBUTE_TYPE_VEC_MIN,
-    QUICLY_EVENT_ATTRIBUTE_SCID,
-    QUICLY_EVENT_ATTRIBUTE_REASON_PHRASE,
-    QUICLY_EVENT_ATTRIBUTE_TYPE_VEC_MAX
-} quicly_event_attribute_type_t;
-
-/**
- * an array of attribute names corresponding to quicly_event_attribute_type_t
- */
-extern const char *quicly_event_attribute_names[];
-
-typedef struct st_quicly_event_attribute_t {
-    quicly_event_attribute_type_t type;
-    union {
-        ptls_iovec_t v;
-        int64_t i;
-    } value;
-} quicly_event_attribute_t;
 
 typedef struct st_quicly_cid_t quicly_cid_t;
 typedef struct st_quicly_cid_plaintext_t quicly_cid_plaintext_t;
@@ -197,6 +90,7 @@ typedef struct st_quicly_conn_t quicly_conn_t;
 typedef struct st_quicly_stream_t quicly_stream_t;
 typedef struct st_quicly_dgram_t quicly_dgram_t;
 typedef struct st_quicly_send_context_t quicly_send_context_t;
+typedef struct st_quicly_address_token_plaintext_t quicly_address_token_plaintext_t;
 
 #define QUICLY_CALLBACK_TYPE0(ret, name)                                                                                           \
     typedef struct st_quicly_##name##_t {                                                                                          \
@@ -212,7 +106,7 @@ typedef struct st_quicly_send_context_t quicly_send_context_t;
  * allocates a packet buffer
  */
 typedef struct st_quicly_packet_allocator_t {
-    quicly_datagram_t *(*alloc_packet)(struct st_quicly_packet_allocator_t *self, socklen_t salen, size_t payloadsize);
+    quicly_datagram_t *(*alloc_packet)(struct st_quicly_packet_allocator_t *self, size_t payloadsize);
     void (*free_packet)(struct st_quicly_packet_allocator_t *self, quicly_datagram_t *packet);
 } quicly_packet_allocator_t;
 
@@ -277,10 +171,19 @@ QUICLY_CALLBACK_TYPE(void, closed_by_peer, quicly_conn_t *conn, int err, uint64_
  */
 QUICLY_CALLBACK_TYPE0(int64_t, now);
 /**
- * for event logging
+ * called when a NEW_TOKEN token is received on a connection
  */
-QUICLY_CALLBACK_TYPE(void, event_logger, quicly_event_type_t type, const quicly_event_attribute_t *attributes,
-                     size_t num_attributes);
+QUICLY_CALLBACK_TYPE(int, save_resumption_token, quicly_conn_t *conn, ptls_iovec_t token);
+/**
+ *
+ */
+QUICLY_CALLBACK_TYPE(int, generate_resumption_token, quicly_conn_t *conn, ptls_buffer_t *buf,
+                     quicly_address_token_plaintext_t *token);
+/**
+ *
+ */
+QUICLY_CALLBACK_TYPE(void, finalize_send_packet, quicly_conn_t *conn, ptls_cipher_context_t *hp, ptls_aead_context_t *aead,
+                     quicly_datagram_t *packet, size_t first_byte_at, size_t payload_from, int coalesced);
 
 typedef struct st_quicly_max_stream_data_t {
     uint64_t bidi_local, bidi_remote, uni;
@@ -322,10 +225,14 @@ typedef struct st_quicly_transport_parameters_t {
      * in milliseconds; quicly ignores the value set for quicly_context_t::transport_parameters
      */
     uint16_t max_ack_delay;
+    /**
+     *
+     */
+    uint8_t disable_active_migration : 1;
 } quicly_transport_parameters_t;
 
 struct st_quicly_cid_t {
-    uint8_t cid[QUICLY_MAX_CID_LEN];
+    uint8_t cid[QUICLY_MAX_CID_LEN_V1];
     uint8_t len;
 };
 
@@ -377,6 +284,14 @@ struct st_quicly_context_t {
      */
     quicly_transport_parameters_t transport_params;
     /**
+     * number of packets that can be sent without a key update
+     */
+    uint64_t max_packets_per_key;
+    /**
+     * maximum number of bytes that can be transmitted on a CRYPTO stream (per each epoch)
+     */
+    uint64_t max_crypto_bytes;
+    /**
      * client-only
      */
     unsigned enforce_version_negotiation : 1;
@@ -384,6 +299,10 @@ struct st_quicly_context_t {
      * if inter-node routing is used (by utilising quicly_cid_plaintext_t::node_id)
      */
     unsigned is_clustered : 1;
+    /**
+     * expand client hello so that it does not fit into one datagram
+     */
+    unsigned expand_client_hello : 1;
     /**
      * callback for allocating memory for raw packet
      */
@@ -413,19 +332,17 @@ struct st_quicly_context_t {
      */
     quicly_now_t *now;
     /**
-     * optional callback for debug logging
+     * called wen a NEW_TOKEN token is being received
      */
-    struct {
-        /**
-         * Bitmask of event types to be logged. The field is a union of (1 << event_type).
-         */
-        uint64_t mask;
-        /**
-         * The callback. The value MUST be non-NULL when mask is set to non-zero. quicly_default_event_log is a functor provided by
-         * by quicly that logs the events in JSON streaming format.
-         */
-        quicly_event_logger_t *cb;
-    } event_log;
+    quicly_save_resumption_token_t *save_resumption_token;
+    /**
+     *
+     */
+    quicly_generate_resumption_token_t *generate_resumption_token;
+    /**
+     * optional callback for encryption offloading
+     */
+    quicly_finalize_send_packet_t *finalize_send_packet;
 };
 
 /**
@@ -482,6 +399,10 @@ typedef struct st_quicly_stats_t {
      * RTT
      */
     quicly_rtt_t rtt;
+    /**
+     * Congestion control (experimental; TODO cherry-pick what can be exposed as part of a stable API)
+     */
+    quicly_cc_t cc;
 } quicly_stats_t;
 
 typedef struct st_quicly_feedback_t {
@@ -520,6 +441,10 @@ struct _st_quicly_conn_public_t {
     quicly_cid_plaintext_t master_id;
     struct {
         /**
+         * the local address (may be AF_UNSPEC)
+         */
+        quicly_address_t address;
+        /**
          * the SCID used in long header packets
          */
         quicly_cid_t src_cid;
@@ -536,16 +461,21 @@ struct _st_quicly_conn_public_t {
     } host;
     struct {
         /**
+         * the remote address (cannot be AF_UNSPEC)
+         */
+        quicly_address_t address;
+        /**
          * CID used for emitting the packets
          */
         quicly_cid_t cid;
         /**
          * stateless reset token corresponding to the CID
          */
-        uint8_t stateless_reset_token[QUICLY_STATELESS_RESET_TOKEN_LEN];
+        struct {
+            uint8_t *token;
+            uint8_t _buf[QUICLY_STATELESS_RESET_TOKEN_LEN];
+        } stateless_reset;
         struct st_quicly_conn_streamgroup_state_t bidi, uni;
-        struct sockaddr *sa;
-        socklen_t salen;
         quicly_transport_parameters_t transport_params;
         struct {
             unsigned validated : 1;
@@ -595,8 +525,9 @@ typedef struct st_quicly_stream_callbacks_t {
     /**
      * asks the application to fill the frame payload.  `off` is the offset within the buffer (the beginning position of the buffer
      * changes as `on_send_shift` is invoked). `len` is an in/out argument that specifies the size of the buffer / amount of data
-     * being written.  `wrote_all` is a boolean out parameter indicating if the application has written all the available data.  See
-     * also quicly_stream_sync_sendbuf.
+     * being written.  `wrote_all` is a boolean out parameter indicating if the application has written all the available data.
+     * As this callback is triggered by calling quicly_stream_sync_sendbuf (stream, 1) when tx data is present, it assumes data
+     * to be available - that is `len` return value should be non-zero.
      */
     int (*on_send_emit)(quicly_stream_t *stream, size_t off, void *dst, size_t *len, int *wrote_all);
     /**
@@ -711,6 +642,9 @@ typedef struct st_quicly_decoded_packet_t {
      * octets of the entire packet
      */
     ptls_iovec_t octets;
+    /**
+     * Connection ID(s)
+     */
     struct {
         /**
          * destination CID
@@ -744,13 +678,17 @@ typedef struct st_quicly_decoded_packet_t {
     ptls_iovec_t token;
     /**
      * starting offset of data (i.e., version-dependent area of a long header packet (version numbers in case of VN), odcid (in case
-     * of retry), or encrypted PN)
+     * of retry), encrypted PN (if decrypted_pn is UINT64_MAX) or data (if decrypted_pn is not UINT64_MAX))
      */
     size_t encrypted_off;
     /**
      * size of the datagram
      */
     size_t datagram_size;
+    /**
+     * if not UINT64_MAX, indicates that the packet has been decrypted prior to being passed to `quicly_receive`.
+     */
+    uint64_t decrypted_pn;
     /**
      *
      */
@@ -760,6 +698,26 @@ typedef struct st_quicly_decoded_packet_t {
         QUICLY__DECODED_PACKET_CACHED_NOT_STATELESS_RESET
     } _is_stateless_reset_cached;
 } quicly_decoded_packet_t;
+
+struct st_quicly_address_token_plaintext_t {
+    int is_retry;
+    uint64_t issued_at;
+    quicly_address_t local, remote;
+    union {
+        struct {
+            quicly_cid_t odcid;
+            uint64_t cidpair_hash;
+        } retry;
+        struct {
+            uint8_t bytes[256];
+            size_t len;
+        } resumption;
+    };
+    struct {
+        uint8_t bytes[256];
+        size_t len;
+    } appdata;
+};
 
 /**
  *
@@ -818,14 +776,13 @@ static quicly_stream_id_t quicly_get_host_next_stream_id(quicly_conn_t *conn, in
  */
 static quicly_stream_id_t quicly_get_peer_next_stream_id(quicly_conn_t *conn, int uni);
 /**
- *
- */
-static void quicly_get_peername(quicly_conn_t *conn, struct sockaddr **sa, socklen_t *salen);
-/**
  * Report feedback to the application
  */
 int quicly_get_feedback(quicly_conn_t *conn, quicly_feedback_t *fb);
-
+/**
+ *
+ */
+static struct sockaddr *quicly_get_peername(quicly_conn_t *conn);
 /**
  *
  */
@@ -873,13 +830,19 @@ int quicly_send_stream(quicly_stream_t *stream, quicly_send_context_t *s);
 /**
  *
  */
-quicly_datagram_t *quicly_send_version_negotiation(quicly_context_t *ctx, struct sockaddr *sa, socklen_t salen,
-                                                   ptls_iovec_t dest_cid, ptls_iovec_t src_cid);
+quicly_datagram_t *quicly_send_version_negotiation(quicly_context_t *ctx, struct sockaddr *dest_addr, ptls_iovec_t dest_cid,
+                                                   struct sockaddr *src_addr, ptls_iovec_t src_cid);
 /**
  *
  */
-quicly_datagram_t *quicly_send_retry(quicly_context_t *ctx, struct sockaddr *sa, socklen_t salen, ptls_iovec_t dcid,
-                                     ptls_iovec_t scid, ptls_iovec_t odcid, ptls_iovec_t token);
+int quicly_retry_calc_cidpair_hash(ptls_hash_algorithm_t *sha256, ptls_iovec_t client_cid, ptls_iovec_t server_cid,
+                                   uint64_t *value);
+/**
+ *
+ */
+quicly_datagram_t *quicly_send_retry(quicly_context_t *ctx, ptls_aead_context_t *token_encrypt_ctx, struct sockaddr *dest_addr,
+                                     ptls_iovec_t dest_cid, struct sockaddr *src_addr, ptls_iovec_t src_cid, ptls_iovec_t odcid,
+                                     ptls_iovec_t token_prefix, ptls_iovec_t appdata);
 /**
  *
  */
@@ -887,20 +850,26 @@ int quicly_send(quicly_conn_t *conn, quicly_datagram_t **packets, size_t *num_pa
 /**
  *
  */
-quicly_datagram_t *quicly_send_stateless_reset(quicly_context_t *ctx, struct sockaddr *sa, socklen_t salen, const void *cid);
+quicly_datagram_t *quicly_send_stateless_reset(quicly_context_t *ctx, struct sockaddr *dest_addr, struct sockaddr *src_addr,
+                                               const void *src_cid);
 /**
  *
  */
-int quicly_receive(quicly_conn_t *conn, quicly_decoded_packet_t *packet);
+int quicly_send_resumption_token(quicly_conn_t *conn);
 /**
  *
  */
-int quicly_is_destination(quicly_conn_t *conn, struct sockaddr *sa, socklen_t salen, quicly_decoded_packet_t *decoded);
+int quicly_receive(quicly_conn_t *conn, struct sockaddr *dest_addr, struct sockaddr *src_addr, quicly_decoded_packet_t *packet);
+/**
+ * consults if the incoming packet identified by (dest_addr, src_addr, decoded) belongs to the given connection
+ */
+int quicly_is_destination(quicly_conn_t *conn, struct sockaddr *dest_addr, struct sockaddr *src_addr,
+                          quicly_decoded_packet_t *decoded);
 /**
  *
  */
 int quicly_encode_transport_parameter_list(ptls_buffer_t *buf, int is_client, const quicly_transport_parameters_t *params,
-                                           const quicly_cid_t *odcid, const void *stateless_reset_token);
+                                           const quicly_cid_t *odcid, const void *stateless_reset_token, int expand);
 /**
  *
  */
@@ -910,17 +879,21 @@ int quicly_decode_transport_parameter_list(quicly_transport_parameters_t *params
  * Initiates a new connection.
  * @param new_cid the CID to be used for the connection. path_id is ignored.
  */
-int quicly_connect(quicly_conn_t **conn, quicly_context_t *ctx, const char *server_name, struct sockaddr *sa, socklen_t salen,
-                   const quicly_cid_plaintext_t *new_cid, ptls_handshake_properties_t *handshake_properties,
+int quicly_connect(quicly_conn_t **conn, quicly_context_t *ctx, const char *server_name, struct sockaddr *dest_addr,
+                   struct sockaddr *src_addr, const quicly_cid_plaintext_t *new_cid, ptls_iovec_t address_token,
+                   ptls_handshake_properties_t *handshake_properties,
                    const quicly_transport_parameters_t *resumed_transport_params);
 /**
  * accepts a new connection
- * @param new_cid the CID to be used for the connection. When an error is being returned, the application can reuse the CID provided
- *                to the function.
+ * @param new_cid        The CID to be used for the connection. When an error is being returned, the application can reuse the CID
+ *                       provided to the function.
+ * @param address_token  An validated address validation token, if any.  Applications MUST validate the address validation token
+ *                       before calling this function, dropping the ones that failed to validate.  When a token is supplied,
+ *                       `quicly_accept` will consult the values being supplied assuming that the peer's address has been validated.
  */
-int quicly_accept(quicly_conn_t **conn, quicly_context_t *ctx, struct sockaddr *sa, socklen_t salen,
-                  quicly_decoded_packet_t *packet, ptls_iovec_t retry_odcid, const quicly_cid_plaintext_t *new_cid,
-                  ptls_handshake_properties_t *handshake_properties);
+int quicly_accept(quicly_conn_t **conn, quicly_context_t *ctx, struct sockaddr *dest_addr, struct sockaddr *src_addr,
+                  quicly_decoded_packet_t *packet, quicly_address_token_plaintext_t *address_token,
+                  const quicly_cid_plaintext_t *new_cid, ptls_handshake_properties_t *handshake_properties);
 /**
  *
  */
@@ -949,6 +922,10 @@ void quicly_reset_stream(quicly_stream_t *stream, int err);
  *
  */
 void quicly_request_stop(quicly_stream_t *stream, int err);
+/**
+ *
+ */
+static int quicly_stop_requested(quicly_stream_t *stream);
 /**
  *
  */
@@ -982,13 +959,58 @@ static int quicly_stream_is_self_initiated(quicly_stream_t *stream);
  */
 void quicly_amend_ptls_context(ptls_context_t *ptls);
 /**
+ * Encrypts an address token by serializing the plaintext structure and appending an authentication tag.  Bytes between `start_off`
+ * and `buf->off` (at the moment of invocation) is considered part of a token covered by AAD.
+ */
+int quicly_encrypt_address_token(void (*random_bytes)(void *, size_t), ptls_aead_context_t *aead, ptls_buffer_t *buf,
+                                 size_t start_off, const quicly_address_token_plaintext_t *plaintext);
+/**
+ * Decrypts an address token.
+ */
+int quicly_decrypt_address_token(ptls_aead_context_t *aead, quicly_address_token_plaintext_t *plaintext, const void *src,
+                                 size_t len, size_t prefix_len);
+/**
  *
  */
 static void quicly_byte_to_hex(char *dst, uint8_t v);
 /**
  *
  */
+socklen_t quicly_get_socklen(struct sockaddr *sa);
+/**
+ * Builds a safe string. Supplied buffer MUST be 4x + 1 bytes bigger than the input.
+ */
+char *quicly_escape_unsafe_string(char *dst, const void *bytes, size_t len);
+/**
+ *
+ */
 char *quicly_hexdump(const uint8_t *bytes, size_t len, size_t indent);
+/**
+ *
+ */
+void quicly_stream_noop_on_destroy(quicly_stream_t *stream, int err);
+/**
+ *
+ */
+void quicly_stream_noop_on_send_shift(quicly_stream_t *stream, size_t delta);
+/**
+ *
+ */
+int quicly_stream_noop_on_send_emit(quicly_stream_t *stream, size_t off, void *dst, size_t *len, int *wrote_all);
+/**
+ *
+ */
+int quicly_stream_noop_on_send_stop(quicly_stream_t *stream, int err);
+/**
+ *
+ */
+int quicly_stream_noop_on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len);
+/**
+ *
+ */
+int quicly_stream_noop_on_receive_reset(quicly_stream_t *stream, int err);
+
+extern const quicly_stream_callbacks_t quicly_stream_noop_callbacks;
 
 /* inline definitions */
 
@@ -1057,11 +1079,10 @@ inline quicly_stream_id_t quicly_get_peer_next_stream_id(quicly_conn_t *conn, in
     return uni ? c->peer.uni.next_stream_id : c->peer.bidi.next_stream_id;
 }
 
-inline void quicly_get_peername(quicly_conn_t *conn, struct sockaddr **sa, socklen_t *salen)
+inline struct sockaddr *quicly_get_peername(quicly_conn_t *conn)
 {
     struct _st_quicly_conn_public_t *c = (struct _st_quicly_conn_public_t *)conn;
-    *sa = c->peer.sa;
-    *salen = c->peer.salen;
+    return &c->peer.address.sa;
 }
 
 inline void **quicly_get_data(quicly_conn_t *conn)
@@ -1074,6 +1095,11 @@ inline void quicly_set_data(quicly_conn_t *conn, void *data)
 {
     struct _st_quicly_conn_public_t *c = (struct _st_quicly_conn_public_t *)conn;
     c->data = data;
+}
+
+inline int quicly_stop_requested(quicly_stream_t *stream)
+{
+    return stream->_send_aux.stop_sending.sender_state != QUICLY_SENDER_STATE_NONE;
 }
 
 inline int quicly_stream_is_client_initiated(quicly_stream_id_t stream_id)
