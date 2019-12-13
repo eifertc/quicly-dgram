@@ -47,6 +47,7 @@ struct _GstQuiclysink
   gchar *bind_iaddr;
   gint bind_port;
   GstCaps *caps;
+  GstClockID clockId;
 
   guint quicly_mtu;
 

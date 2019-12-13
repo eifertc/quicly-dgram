@@ -58,6 +58,8 @@ static void gst_quiclysink_get_property (GObject * object,
     guint property_id, GValue * value, GParamSpec * pspec);
 static void gst_quiclysink_dispose (GObject * object);
 static void gst_quiclysink_finalize (GObject * object);
+static gboolean gst_quiclysink_set_clock(GstElement *ele, GstClock *clock);
+gboolean receive_async_cb(GstClock *clock, GstClockTime t, GstClockID id, gpointer data);
 
 static gboolean gst_quiclysink_set_caps (GstBaseSink * sink, GstCaps * caps);
 static gboolean gst_quiclysink_start (GstBaseSink * sink);
@@ -138,6 +140,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define DEFAULT_PRIVATE_KEY       NULL
 #define DEFAULT_STREAM_MODE       FALSE
 #define DEFAULT_AUTO_CAPS_EXCHANGE FALSE
+#define RECEIVE_CLOCK_TIME_NS     2000000 
 
 /* properties */
 enum
@@ -184,6 +187,7 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   //GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GObjectClass *gobject_class = (GObjectClass *)klass;
   GstBaseSinkClass *base_sink_class = GST_BASE_SINK_CLASS (klass);
+  GstElementClass *gstelement_class = (GstElementClass *) klass;
 
   /* Setting up pads and setting metadata should be moved to
      base_class_init if you intend to subclass this class. */
@@ -222,6 +226,8 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   base_sink_class->set_caps = GST_DEBUG_FUNCPTR (gst_quiclysink_set_caps);
   base_sink_class->render = GST_DEBUG_FUNCPTR (gst_quiclysink_render);
   base_sink_class->render_list = GST_DEBUG_FUNCPTR (gst_quiclysink_render_list);
+
+  gstelement_class->set_clock = GST_DEBUG_FUNCPTR(gst_quiclysink_set_clock);
 
   g_object_class_install_property(gobject_class, PROP_BIND_ADDRESS, g_param_spec_string("bind-addr", "BindAddr", "the host address to bind", UDP_DEFAULT_BIND_ADDRESS, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property(gobject_class, PROP_BIND_PORT, g_param_spec_int("bind-port", "BindPort", "the port to bind", 1, 65535, UDP_DEFAULT_BIND_PORT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
@@ -265,6 +271,7 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->stream_mode = DEFAULT_STREAM_MODE;
   quiclysink->received_caps_ack = FALSE;
   quiclysink->auto_caps_exchange = DEFAULT_AUTO_CAPS_EXCHANGE;
+  quiclysink->clockId = NULL;
 
   /* Setup quicly and tls context */
   quiclysink->tlsctx.random_bytes = ptls_openssl_random_bytes;
@@ -409,6 +416,8 @@ gst_quiclysink_finalize (GObject * object)
     g_free(quiclysink->bind_iaddr);
     quiclysink->bind_iaddr = NULL;
   }
+
+  gst_clock_id_unref(quiclysink->clockId);
 
   /* clean up quicly ressources */
   if (quiclysink->recv_buf != NULL) {
@@ -581,20 +590,6 @@ gst_quiclysink_stop (GstBaseSink * sink)
   return TRUE;
 }
 
-/* notify subclass of event */
-/*
-static gboolean
-gst_quiclysink_event (GstBaseSink * sink, GstEvent * event)
-{
-  g_print("event\n");
-  GstQuiclysink *quiclysink = GST_QUICLYSINK (sink);
-
-  GST_DEBUG_OBJECT (quiclysink, "event");
-
-  return TRUE;
-}
-*/
-
 typedef struct {
     uint8_t ver_p_x_cc;
     uint8_t m_pt;
@@ -611,18 +606,16 @@ inline static void emit_feedback_signal(GstQuiclysink *quiclysink)
   /* get quicly feedback */
   quiclysink->fb_timeout = quiclysink->ctx.now->cb(quiclysink->ctx.now);
   quicly_get_feedback(quiclysink->conn, &quiclysink->feedback);
-  //g_print("Bytes_in_flight: %lu. Cwnd: %u\n", quiclysink->feedback.bytes_in_flight, quiclysink->feedback.cwnd);
-  /*
+
   g_signal_emit(quiclysink, quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT], 0,
     quiclysink->feedback.rtt_minimum, quiclysink->feedback.rtt_smoothed, 
     quiclysink->feedback.rtt_latest, quiclysink->feedback.cwnd, quiclysink->feedback.bytes_in_flight,
     quiclysink->feedback.bytes_sent, quiclysink->feedback.bytes_lost, quiclysink->feedback.bytes_acked,
     quiclysink->feedback.packets_sent, quiclysink->feedback.packets_lost, quiclysink->feedback.packets_acked);
-  */
 }
 
 /* TODO: Use only one function. e.g. call the same function from render and
- *   render list
+ *   render list, compare MultiUDPsink.c
  */
 static GstFlowReturn
 gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
@@ -630,12 +623,17 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
   GstQuiclysink *quiclysink = GST_QUICLYSINK (sink);
 
   GST_LOG_OBJECT (quiclysink, "render");
-  if (!quiclysink->silent)
-    g_print("Have data size %lu bytes\n", gst_buffer_get_size(buffer));
 
   GstMapInfo map;
-  gssize rret;
   int ret;
+  //GIOCondition con;
+  /* 
+  if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN)) & G_IO_IN) {
+      if ((ret = receive_packet(quiclysink)) != 0)
+        g_printerr("Receive failed in render\n");
+  }
+  */
+
   gst_buffer_map(buffer, &map, GST_MAP_READ);
 
   /* Check if payload size fits in one quicly datagram frame */
@@ -662,15 +660,6 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
   quiclysink->num_bytes += map.size;
   gst_buffer_unmap(buffer, &map);
 
-  /* Try to receive one packet or return */
-  GIOCondition con;
-  if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN)) & G_IO_IN) {
-      if ((rret = receive_packet(quiclysink)) != 0)
-        g_printerr("Receive failed in render\n");
-      // TODO: FIX this with accurate error handling
-      // use ret NOT rret
-  }
-
   /* Emit feedback every ~10ms */
   if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > 50)
     emit_feedback_signal(quiclysink);
@@ -688,8 +677,16 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
   GstMapInfo map;
   int ret;
   gssize all = 0;
+  //GIOCondition con;
 
   GST_LOG_OBJECT(quiclysink, "render_list");
+
+  /* 
+  if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN)) & G_IO_IN) {
+      if ((ret = receive_packet(quiclysink)) != 0)
+        g_printerr("Receive failed in render\n");
+  }
+  */
 
   num_buffers = gst_buffer_list_length(buffer_list);
   if (num_buffers == 0) {
@@ -734,20 +731,28 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
     flow = GST_FLOW_OK;
   }
 
-  /* Try to receive one packet or return */
-  GIOCondition con;
-  if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN)) & G_IO_IN) {
-      if ((ret = receive_packet(quiclysink)) != 0)
-        g_printerr("Receive failed in render\n");
-      // TODO: FIX this with accurate error handling
-      // use ret NOT rret
-  }
-
   /* Emit feedback every ~10ms */
   if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > 50)
     emit_feedback_signal(quiclysink);
 
   return flow;
+}
+
+gboolean receive_async_cb(GstClock *clock, GstClockTime t, GstClockID id, gpointer data)
+{
+  GstQuiclysink *quiclysink = GST_QUICLYSINK(data);
+
+  /* Try to receive one packet */
+  GIOCondition con;
+  GST_OBJECT_LOCK(quiclysink);
+  if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN | G_IO_PRI)) & 
+                                      (G_IO_IN | G_IO_PRI)) {
+      if (receive_packet(quiclysink) != 0)
+        g_printerr("Receive failed\n");
+  }
+  GST_OBJECT_UNLOCK(quiclysink);
+
+  return TRUE;
 }
 
 static int receive_packet(GstQuiclysink *quiclysink)
@@ -766,7 +771,6 @@ static int receive_packet(GstQuiclysink *quiclysink)
     return -1;
   }
   off = 0;
-
   /* TODO: Remove sockaddr cast by using recvfrom */
   /* Convert GSocketAddress to native */
   struct sockaddr native_sa;
@@ -828,17 +832,20 @@ static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t le
 
 static int send_pending(GstQuiclysink *quiclysink)
 {
-  quicly_datagram_t *packets[24];
+  quicly_datagram_t *packets[16];
   size_t num_packets, i;
   gssize rret;
   int ret;
   GError *err = NULL;
   gssize all = 0;
-  GIOCondition con;
+  //GIOCondition con;
 
   do {
       num_packets = sizeof(packets) / sizeof(packets[0]);
-      if ((ret = quicly_send(quiclysink->conn, packets, &num_packets)) == 0) {
+      GST_OBJECT_LOCK(quiclysink);
+      ret = quicly_send(quiclysink->conn, packets, &num_packets);
+      GST_OBJECT_UNLOCK(quiclysink);
+      if (ret == 0) {
         for (i = 0; i != num_packets; ++i) {
           if ((rret = g_socket_send_to(quiclysink->socket, quiclysink->conn_addr, 
                                        (gchar *)packets[i]->data.base, 
@@ -859,13 +866,12 @@ static int send_pending(GstQuiclysink *quiclysink)
       } else {
         g_printerr("Send returned %i.\n", ret);
       }
-    /* receive one, we need acks to keep the send window open */
+    /* 
     if ((con = g_socket_condition_check(quiclysink->socket, G_IO_IN)) & G_IO_IN) {
       if ((rret = receive_packet(quiclysink)) != 0)
         g_printerr("Receive failed in render\n");
-        // TODO: FIX this with accurate error handling
-        // use ret NOT rret
     }
+    */
   } while ((ret == 0) && 
     (quicly_dgram_can_send(quiclysink->dgram) || 
     quiclysink->ctx.stream_scheduler->can_send(quiclysink->ctx.stream_scheduler, quiclysink->conn, 0)) && 
@@ -1031,6 +1037,25 @@ Exit:
         fclose(fp);
     ptls_buffer_dispose(&buf);
     return 0;
+}
+
+/* Obtain the pipeline clock and schedule a callback for receving quic packets */
+static gboolean gst_quiclysink_set_clock(GstElement *ele, GstClock *clock)
+{
+  GstQuiclysink *quiclysink = GST_QUICLYSINK(ele);
+  
+  if (GST_IS_CLOCK(clock)) {
+    if ((quiclysink->clockId = gst_clock_new_periodic_id(clock, 
+                                      gst_clock_get_internal_time(clock), 
+                                      RECEIVE_CLOCK_TIME_NS)) == NULL)
+      g_printerr("Could not create periodic clock\n");
+
+    if(gst_clock_id_wait_async(quiclysink->clockId, receive_async_cb, quiclysink, NULL) != GST_CLOCK_OK) {
+      g_printerr("Failed to schedule async receive callback\n");
+    } 
+  } 
+
+  return GST_ELEMENT_CLASS(gst_quiclysink_parent_class)->set_clock(ele, clock);
 }
 
 static gboolean

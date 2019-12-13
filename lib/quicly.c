@@ -2513,6 +2513,7 @@ static int _do_allocate_frame(quicly_conn_t *conn, quicly_send_context_t *s, siz
         uint8_t ack_epoch = get_epoch(s->current.first_byte);
         if (ack_epoch == QUICLY_EPOCH_0RTT)
             ack_epoch = QUICLY_EPOCH_1RTT;
+        //printf("sent. nr: %lu, now: %ld\n", conn->egress.packet_number, now);
         if ((ret = quicly_sentmap_prepare(&conn->egress.sentmap, conn->egress.packet_number, now, ack_epoch)) != 0)
             return ret;
     }
@@ -2565,7 +2566,7 @@ static int send_ack(quicly_conn_t *conn, struct st_quicly_pn_space_t *space, qui
 Emit:
     if ((ret = allocate_frame(conn, s, QUICLY_ACK_FRAME_CAPACITY)) != 0)
         return ret;
-    uint8_t *new_dst = quicly_encode_ack_frame(s->dst, s->dst_end, &space->ack_queue, ack_delay);
+    uint8_t *new_dst = quicly_encode_ack_frame(s->dst, s->dst_end, &space->ack_queue, ack_delay, space->largest_pn_received_at);
     if (new_dst == NULL) {
         /* no space, retry with new MTU-sized packet */
         if ((ret = commit_send_packet(conn, s, 0)) != 0)
@@ -3883,7 +3884,7 @@ static int handle_ack_frame(quicly_conn_t *conn, struct st_quicly_handle_payload
 
     if ((ret = quicly_decode_ack_frame(&state->src, state->end, &frame, state->frame_type == QUICLY_FRAME_TYPE_ACK_ECN)) != 0)
         return ret;
-
+    //printf("smallest: %lu, largest: %lu\n", frame.smallest_acknowledged, frame.largest_acknowledged);
     uint64_t packet_number = frame.smallest_acknowledged;
 
     switch (state->epoch) {
@@ -3913,6 +3914,7 @@ static int handle_ack_frame(quicly_conn_t *conn, struct st_quicly_handle_payload
                     if (state->epoch == sent->ack_epoch) {
                         largest_newly_acked.packet_number = packet_number;
                         largest_newly_acked.sent_at = sent->sent_at;
+                        //printf("recv. nr: %lu, now: %ld\n", packet_number, now);
                         includes_ack_eliciting |= sent->ack_eliciting;
                         QUICLY_PROBE(PACKET_ACKED, conn, probe_now(), packet_number, 1);
                         if (sent->bytes_in_flight != 0) {

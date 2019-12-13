@@ -21,6 +21,7 @@
  */
 #include <assert.h>
 #include <string.h>
+#include <stdio.h>
 #include "quicly/frame.h"
 
 uint8_t *quicly_encode_path_challenge_frame(uint8_t *dst, int is_response, const uint8_t *data)
@@ -31,7 +32,7 @@ uint8_t *quicly_encode_path_challenge_frame(uint8_t *dst, int is_response, const
     return dst;
 }
 
-uint8_t *quicly_encode_ack_frame(uint8_t *dst, uint8_t *dst_end, quicly_ranges_t *ranges, uint64_t ack_delay)
+uint8_t *quicly_encode_ack_frame(uint8_t *dst, uint8_t *dst_end, quicly_ranges_t *ranges, uint64_t ack_delay, uint64_t largest_ack_received_at)
 {
 #define WRITE_BLOCK(start, end)                                                                                                    \
     do {                                                                                                                           \
@@ -48,9 +49,10 @@ uint8_t *quicly_encode_ack_frame(uint8_t *dst, uint8_t *dst_end, quicly_ranges_t
 
     *dst++ = QUICLY_FRAME_TYPE_ACK;
     dst = quicly_encodev(dst, ranges->ranges[range_index].end - 1); /* largest acknowledged */
+    dst = quicly_encodev(dst, largest_ack_received_at);             /* Receive timestamp */
     dst = quicly_encodev(dst, ack_delay);                           /* ack delay */
     dst = quicly_encodev(dst, ranges->num_ranges - 1);              /* ack blocks */
-
+    //printf("num_ranges: %lu, end: %lu, start: %lu\n", ranges->num_ranges - 1, ranges->ranges[range_index].end, ranges->ranges[range_index].start);
     while (1) {
         WRITE_BLOCK(ranges->ranges[range_index].start, ranges->ranges[range_index].end); /* ACK block count */
         if (range_index-- == 0)
@@ -69,6 +71,8 @@ int quicly_decode_ack_frame(const uint8_t **src, const uint8_t *end, quicly_ack_
 
     if ((frame->largest_acknowledged = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
+    if ((frame->receive_time = quicly_decodev(src, end)) == UINT64_MAX)
+        goto Error;
     if ((frame->ack_delay = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
     if ((num_gaps = quicly_decodev(src, end)) == UINT64_MAX)
@@ -79,6 +83,7 @@ int quicly_decode_ack_frame(const uint8_t **src, const uint8_t *end, quicly_ack_
     if (frame->largest_acknowledged < ack_range)
         goto Error;
     frame->smallest_acknowledged = frame->largest_acknowledged - ack_range;
+    //printf("count: %lu, s: %lu, l: %lu\n", num_gaps, frame->smallest_acknowledged, frame->largest_acknowledged);
     frame->ack_block_lengths[0] = ack_range + 1;
     frame->num_gaps = 0;
 

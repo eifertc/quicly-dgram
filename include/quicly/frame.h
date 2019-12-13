@@ -74,7 +74,7 @@ extern "C" {
 #define QUICLY_STREAMS_BLOCKED_FRAME_CAPACITY (1 + 8)
 #define QUICLY_STOP_SENDING_FRAME_CAPACITY (1 + 8 + 8)
 #define QUICLY_ACK_MAX_GAPS 256
-#define QUICLY_ACK_FRAME_CAPACITY (1 + 8 + 8 + 1 + 8)
+#define QUICLY_ACK_FRAME_CAPACITY (1 + 8 + 8 + 8 + 1 + 8)
 #define QUICLY_PATH_CHALLENGE_FRAME_CAPACITY (1 + 8)
 #define QUICLY_STREAM_FRAME_CAPACITY (1 + 8 + 8 + 1)
 
@@ -212,12 +212,13 @@ typedef struct st_quicly_stop_sending_frame_t {
 static int quicly_decode_stop_sending_frame(const uint8_t **src, const uint8_t *end, quicly_stop_sending_frame_t *frame);
 
 #define QUICLY_ENCODE_ACK_MAX_BLOCKS 63 /* exclusive, see encode_ack_frame */
-uint8_t *quicly_encode_ack_frame(uint8_t *dst, uint8_t *dst_end, quicly_ranges_t *ranges, uint64_t ack_delay);
+uint8_t *quicly_encode_ack_frame(uint8_t *dst, uint8_t *dst_end, quicly_ranges_t *ranges, uint64_t ack_delay, uint64_t largest_ack_received_at);
 
 typedef struct st_quicly_ack_frame_t {
     uint64_t largest_acknowledged;
     uint64_t smallest_acknowledged;
     uint64_t ack_delay;
+    uint64_t receive_time;
     uint64_t num_gaps;
     uint64_t ack_block_lengths[QUICLY_ACK_MAX_GAPS + 1];
     uint64_t gaps[QUICLY_ACK_MAX_GAPS];

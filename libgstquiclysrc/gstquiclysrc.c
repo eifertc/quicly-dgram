@@ -75,18 +75,22 @@ static void gst_quiclysrc_get_property (GObject * object,
 static void gst_quiclysrc_finalize (GObject * object);
 
 static GstCaps *gst_quiclysrc_get_caps (GstBaseSrc * src, GstCaps * filter);
-//static gboolean gst_quiclysrc_decide_allocation (GstBaseSrc * src, GstQuery * query);
 static gboolean gst_quiclysrc_start (GstBaseSrc * src);
 static gboolean gst_quiclysrc_stop (GstBaseSrc * src);
 static gboolean gst_quiclysrc_unlock (GstBaseSrc * src);
 static gboolean gst_quiclysrc_unlock_stop (GstBaseSrc * src);
-static GstFlowReturn gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf);
 static gboolean gst_quiclysrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * query);
 
+// buffer list
+static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf);
+static gboolean gst_quiclysrc_negotiate(GstBaseSrc *basesrc);
+static gboolean gst_quiclysrc_free_buffer_list_mem(GstQuiclysrc *src);
+static gboolean gst_quiclysrc_realloc_mem_sizes(GstQuiclysrc *src);
+//static gboolean gst_quiclysrc_alloc_mem(GstQuiclysrc *src, GstMemory **pmem, GstMapInfo *map);
+static gboolean gst_quiclysrc_ensure_mem(GstQuiclysrc *src);
 
 /* quicly prototypes */
 static int save_ticket_cb(ptls_save_ticket_t *_self, ptls_t *tls, ptls_iovec_t src);
-static int on_client_hello_cb(ptls_on_client_hello_t *_self, ptls_t *tls, ptls_on_client_hello_parameters_t *params);
 static void on_closed_by_peer(quicly_closed_by_peer_t *self, quicly_conn_t *conn, int err, uint64_t frame_type, const char *reason,
                               size_t reason_len);
 static int on_dgram_open(quicly_dgram_open_t *self, quicly_dgram_t *dgram);
@@ -96,22 +100,13 @@ static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len);
 static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *src, size_t len);
 static int on_receive_reset(quicly_stream_t *stream, int err);
 static int send_pending(GstQuiclysrc *quiclysrc);
-//static int receive_packet(GstQuiclysrc *quiclysink);
-//static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len);
 static int receive_packet(GstQuiclysrc *quiclysrc, GError *err);
 static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc);
 
+/* TODO: do something with that, needs to be a property */
 static const char *session_file = NULL;
 
-/* TODO NEW API STUFF */
-/*
-static struct {
-    ptls_aead_context_t *enc, *dec;
-} address_token_aead;
-*/
-
 /* quicly callbacks */
-static ptls_on_client_hello_t on_client_hello = {on_client_hello_cb};
 static ptls_save_ticket_t save_ticket = {save_ticket_cb};
 static quicly_dgram_open_t dgram_open = {&on_dgram_open};
 static quicly_stream_open_t stream_open = {&on_stream_open};
@@ -136,6 +131,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define QUICLY_DEFAULT_MTU    1280
 #define DEFAULT_HOST          "127.0.0.1"
 #define DEFAULT_PORT          5000
+#define MAX_BUFFER_LIST_SIZE  32
 
 enum
 {
@@ -206,13 +202,18 @@ gst_quiclysrc_class_init (GstQuiclysrcClass * klass)
   gobject_class->finalize = gst_quiclysrc_finalize;
 
   base_src_class->get_caps = GST_DEBUG_FUNCPTR (gst_quiclysrc_get_caps);
+  //base_src_class->decide_allocation = GST_DEBUG_FUNCPTR (gst_quiclysrc_decide_allocation);
   base_src_class->start = GST_DEBUG_FUNCPTR (gst_quiclysrc_start);
   base_src_class->stop = GST_DEBUG_FUNCPTR (gst_quiclysrc_stop);
   base_src_class->decide_allocation = gst_quiclysrc_decide_allocation;
   base_src_class->unlock = GST_DEBUG_FUNCPTR (gst_quiclysrc_unlock);
   base_src_class->unlock_stop = GST_DEBUG_FUNCPTR (gst_quiclysrc_unlock_stop);
+  //push_src_class->fill = GST_DEBUG_FUNCPTR (gst_quiclysrc_fill);
 
-  push_src_class->fill = GST_DEBUG_FUNCPTR (gst_quiclysrc_fill);
+  /* buffer list */
+  push_src_class->create = GST_DEBUG_FUNCPTR (gst_quiclysrc_create);
+  base_src_class->negotiate = GST_DEBUG_FUNCPTR (gst_quiclysrc_negotiate);
+  
 
   g_object_class_install_property(gobject_class, PROP_HOST,
                                   g_param_spec_string("host", 
@@ -283,7 +284,6 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
   quiclysrc->tlsctx.cipher_suites = ptls_openssl_cipher_suites;
   quiclysrc->tlsctx.require_dhe_on_psk = 1;
   quiclysrc->tlsctx.save_ticket = &save_ticket;
-  quiclysrc->tlsctx.on_client_hello = &on_client_hello;
 
   quiclysrc->ctx = quicly_spec_context;
   quiclysrc->ctx.tls = &quiclysrc->tlsctx;
@@ -308,6 +308,17 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
   quiclysrc->connected = FALSE;
   quiclysrc->recv_buf = malloc(sizeof(gchar) * (2048 + 1));
   quiclysrc->recv_buf_size = 2048;
+
+  /* init mem alloc for buffer list */
+  quiclysrc->mem_list = NULL;
+  quiclysrc->map_list = NULL;
+  quiclysrc->vec_list = NULL;
+  quiclysrc->pushed_list = NULL;
+  quiclysrc->mem_list_allocated = FALSE;
+  quiclysrc->mem_list_size = MAX_BUFFER_LIST_SIZE;
+  quiclysrc->allocator = NULL;
+  gst_allocation_params_init(&quiclysrc->params);
+  gst_quiclysrc_realloc_mem_sizes(quiclysrc);
 }
 
 void
@@ -415,6 +426,8 @@ gst_quiclysrc_finalize (GObject * object)
 
   g_free(quiclysrc->recv_buf);
   quiclysrc->recv_buf = NULL;
+
+  gst_quiclysrc_free_buffer_list_mem(quiclysrc);
 
   G_OBJECT_CLASS (gst_quiclysrc_parent_class)->finalize (object);
 }
@@ -525,7 +538,6 @@ gst_quiclysrc_start (GstBaseSrc * src)
   if ((ret = send_pending(quiclysrc)) != 0)
     g_printerr("Could not send inital packets.\n");
 
-
   g_print("Connecting...\n");
   while(quicly_connection_is_ready(quiclysrc->conn) == 0) {
     timeout_at = quiclysrc->conn != NULL ? quicly_get_first_timeout(quiclysrc->conn) : INT64_MAX;
@@ -596,11 +608,7 @@ static int receive_packet(GstQuiclysrc *quiclysrc, GError *err)
   
     off += plen;
   }
-
   g_object_unref(in_addr);
-
-  // TODO: Find better solution
-  send_pending(quiclysrc);
 
   return 0;
 }
@@ -616,7 +624,7 @@ static int send_pending(GstQuiclysrc *quiclysrc) {
   do {
     num_packets = sizeof(packets) / sizeof(packets[0]);
     if ((ret = quicly_send(quiclysrc->conn, packets, &num_packets)) == 0) {
-
+      /* TODO: unnecessary? */
       if (num_packets > 0) {
         addr = g_socket_address_new_from_native(&packets[0]->dest.sa,
                                                  quicly_get_socklen(&packets[0]->dest.sa));
@@ -680,7 +688,6 @@ gst_quiclysrc_stop (GstBaseSrc * src)
 
 /* unlock any pending access to the resource. subclasses should unlock
  * any function ASAP. */
-
 static gboolean
 gst_quiclysrc_unlock (GstBaseSrc * src)
 {
@@ -689,13 +696,10 @@ gst_quiclysrc_unlock (GstBaseSrc * src)
   GST_DEBUG_OBJECT (quiclysrc, "unlock");
   g_cancellable_cancel (quiclysrc->cancellable);
 
-
   return TRUE;
 }
 
-
 /* Clear any pending unlock request, as we succeeded in unlocking */
-
 static gboolean
 gst_quiclysrc_unlock_stop (GstBaseSrc * src)
 {
@@ -709,88 +713,178 @@ gst_quiclysrc_unlock_stop (GstBaseSrc * src)
   return TRUE;
 }
 
-/* ask the subclass to fill the buffer with data from offset and size */
-static GstFlowReturn
-gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
+static void gst_quiclysrc_reset_memory_allocator(GstQuiclysrc *src)
 {
-  GstQuiclysrc *quiclysrc = GST_QUICLYSRC (src);
+  if (src->mem_list != NULL) {
+    for (int i = 0; i < src->mem_list_size; i++) {
+      if (src->mem_list[i] != NULL) {
+        gst_memory_unmap(src->mem_list[i], src->map_list[i]);
+        gst_memory_unref(src->mem_list[i]);
+        src->mem_list[i] = NULL;
+      }
+      src->vec_list[i]->buffer = NULL;
+      src->vec_list[i]->size = 0;
+    }
+  }
 
-  GST_DEBUG_OBJECT (quiclysrc, "fill");
+  if (src->allocator != NULL) {
+    gst_object_unref(src->allocator);
+    src->allocator = NULL;
+  }
+}
 
-  if (quiclysrc->transport_close)
+static gboolean gst_quiclysrc_negotiate(GstBaseSrc *basesrc)
+{
+  GstQuiclysrc *src = GST_QUICLYSRC_CAST(basesrc);
+  gboolean ret;
+
+  ret = GST_BASE_SRC_CLASS(gst_quiclysrc_parent_class)->negotiate(basesrc);
+
+  if (ret) {
+    GstAllocationParams new_params;
+    GstAllocator *new_allocator = NULL;
+
+    gst_base_src_get_allocator(basesrc, &new_allocator, &new_params);
+    if (new_allocator == NULL)
+
+    if (src->allocator != new_allocator || memcmp(&src->params, &new_params, sizeof(GstAllocationParams)) != 0) {
+      gst_quiclysrc_reset_memory_allocator(src);
+
+      src->allocator = new_allocator;
+      src->params = new_params;
+
+      GST_INFO_OBJECT(src, "new mem allocator\n");
+    }
+  }
+
+  return ret;
+}
+
+static gboolean gst_quiclysrc_free_buffer_list_mem(GstQuiclysrc *src)
+{
+  if (src->mem_list != NULL) {
+    for (int i = 0; i < src->mem_list_size; i++) {
+      if (src->mem_list[i] != NULL) {
+        gst_memory_unmap(src->mem_list[i], src->map_list[i]);
+        gst_memory_unref(src->mem_list[i]);
+        src->mem_list[i] = NULL;
+      }
+      free(src->map_list[i]);
+      free(src->vec_list[i]);
+    }
+    free(src->map_list);
+    free(src->vec_list);
+    free(src->pushed_list);
+  }
+
+   if (src->mem_list != NULL) {
+    free(src->mem_list);
+  }
+
+  return TRUE;
+}
+
+static gboolean gst_quiclysrc_realloc_mem_sizes(GstQuiclysrc *src)
+{
+  if (src->mem_list != NULL)
+    gst_quiclysrc_free_buffer_list_mem(src);
+
+  src->map_list = malloc(src->mem_list_size * sizeof(GstMapInfo *));
+  src->vec_list = malloc(src->mem_list_size * sizeof(GInputVector *));
+  src->pushed_list = (gint *) malloc(src->mem_list_size * sizeof(gint));
+  src->mem_list = malloc(src->mem_list_size * sizeof(GstMemory *));
+  for (int i = 0; i < src->mem_list_size; i++) {
+    src->map_list[i] = malloc(sizeof(GstMapInfo));
+    src->vec_list[i] = malloc(sizeof(GInputVector));
+    src->mem_list[i] = NULL;
+  }
+
+  return TRUE;
+}
+
+static gboolean gst_quiclysrc_alloc_mem(GstQuiclysrc *src, GstMemory **pmem, GstMapInfo *map)
+{
+  GstMemory *mem;
+  mem = gst_allocator_alloc(src->allocator, src->quicly_mtu, &src->params);
+
+  if (!gst_memory_map(mem, map, GST_MAP_WRITE)) {
+    gst_memory_unref(mem);
+    memset(map, 0, sizeof(GstMapInfo));
+    return FALSE;
+  }
+  *pmem = mem;
+  return TRUE;
+}
+
+/* 
+ * Allocate new memory for buffers
+ */
+static gboolean gst_quiclysrc_ensure_mem(GstQuiclysrc *src)
+{
+  if (!src->mem_list_allocated) {
+    /* or use a parameter in the function call? */
+    for (int i = 0; i < src->mem_list_size; i++) {
+      if (src->mem_list[i] == NULL) {
+        if (!gst_quiclysrc_alloc_mem(src, &src->mem_list[i], src->map_list[i]))
+          return FALSE;
+        src->vec_list[i]->buffer = src->map_list[i]->data;
+        src->vec_list[i]->size = src->map_list[i]->size;
+      }
+    }
+  }
+  src->mem_list_allocated = TRUE;
+  return TRUE;
+}
+
+static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
+{
+  GstBaseSrc *base = GST_BASE_SRC_CAST(src);
+  GstQuiclysrc *quiclysrc = GST_QUICLYSRC_CAST(src);
+
+  if (quiclysrc->transport_close) {
+    g_print("END OF STREAM\n");
     return GST_FLOW_EOS;
-
-  GstMapInfo info;
+  }
+  
+  if (!gst_quiclysrc_ensure_mem(quiclysrc))
+    return GST_FLOW_ERROR;
+  
+  gsize written = 0;
+  gsize ret;
   GError *err = NULL;
-  int ret;
 
-  if (!gst_buffer_map(buf, &info, GST_MAP_READWRITE)) {
-    g_printerr("Failed to map buffer\n");
-    return GST_FLOW_ERROR;
-  }
-
-  if (info.size < 1200) {
-    g_printerr("Buffer too small\n");
-    return GST_FLOW_ERROR;
-  }
-
-  /* Check if we have stored frames from previous receives */
+  /* Check if we have stored frames from previous receives. Should only happen in case of many packets much smaller than the mtu */
   if (quiclysrc->dgram != NULL) {
-    if (quicly_dgram_can_get_data(quiclysrc->dgram) > 0) {
-      gsize len = info.size;
-      quicly_dgrambuf_ingress_get(quiclysrc->dgram, info.data, &len);
-      gst_buffer_unmap(buf, &info);
+    while ((quicly_dgram_can_get_data(quiclysrc->dgram)) > 0 && (written < quiclysrc->mem_list_size)) {
+      gsize len = quiclysrc->vec_list[written]->size;
+      quicly_dgrambuf_ingress_get(quiclysrc->dgram, quiclysrc->vec_list[written]->buffer, &len);
+      quiclysrc->pushed_list[written] = len;
+      quiclysrc->pushed++;
+      written++;
 
       /* update stats */
       ++quiclysrc->num_packets;
       quiclysrc->num_bytes += len;
 
-      /* Resize the buffer to the size of the received payload */
-      gst_buffer_resize(buf, 0, len);
       quicly_dgrambuf_ingress_shift(quiclysrc->dgram, 1);
-      return GST_FLOW_OK;
-    }
-  } else if (quiclysrc->stream != NULL) {
-    ptls_iovec_t input;
-
-    if ((input = quicly_streambuf_ingress_get(quiclysrc->stream)).len != 0) {
-      /* TODO: Check rtp header version field */
-      rtp_hdr_ *hdr = (rtp_hdr_*) input.base;
-      if ((hdr->framing <= (input.len - 2)) && (input.len >= 2)) {
-
-        /* Make sure rtp packet fits in buffer */
-        if (hdr->framing > 1200) {
-          g_printerr("RTP packet too large.\n");
-          goto error;
-        }
-
-        memcpy(info.data, input.base + 2, hdr->framing);
-        
-        /* stats */
-        ++quiclysrc->num_packets;
-        quiclysrc->num_bytes += hdr->framing;
-
-        quicly_streambuf_ingress_shift(quiclysrc->stream, hdr->framing + 2);
-        return GST_FLOW_OK;
-      } 
     }
   }
 
-  quiclysrc->ivec.buffer = info.data;
-  quiclysrc->ivec.size = info.size;
-  /* TODO: Change timeout. Mabe should call send_pending after ~20ms and then continue loop*/
-  do {
-    if (!g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN | G_IO_PRI, 6000000, quiclysrc->cancellable, &err)) {
-      if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_BUSY) ||
-          g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-        goto stopped;
-      } else if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)) {
-        g_printerr("Timeout in fill\n");
+  /* receive packets */
+  GIOCondition cond = G_IO_IN | G_IO_PRI;
+  GIOCondition out_cond;
+  if (!g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN | G_IO_PRI, 6000000, quiclysrc->cancellable, &err)) {
+    if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_BUSY) ||
+        g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+      goto stopped;
+    } else if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)) {
+        g_printerr("Timeout in receive socket wait\n");
         goto end_stream;
-      } else {
-        goto error;
-      }
+    } else {
+      goto error;
     }
+  }
+  do {
     if ((ret = receive_packet(quiclysrc, err)) != 0) {
       g_printerr("receive_packet failed in fill\n");
       if (err != NULL) {
@@ -798,73 +892,85 @@ gst_quiclysrc_fill (GstPushSrc * src, GstBuffer * buf)
         goto error;
       }
     }
-  } while (quiclysrc->pushed == 0 && !quiclysrc->transport_close);
 
-  if (quiclysrc->transport_close)
-    return GST_FLOW_EOS;
-  
-  gst_buffer_unmap(buf, &info);
+    out_cond = g_socket_condition_check(quiclysrc->socket, cond);
+    if (!(cond & out_cond) && (quiclysrc->pushed != 0)) {
+      break;
+    }
 
-  /* Resize the buffer to the size of the received payload */
-  gst_buffer_resize(buf, 0, quiclysrc->pushed);
+  } while ((!quiclysrc->transport_close) && (quiclysrc->pushed < quiclysrc->mem_list_size));
 
-  quiclysrc->pushed = 0;
-  
   /* Check if there is something to send */
   if (quicly_get_first_timeout(quiclysrc->conn) <= 
-                    quiclysrc->ctx.now->cb(quiclysrc->ctx.now)) {
+                  quiclysrc->ctx.now->cb(quiclysrc->ctx.now)) {
     if (send_pending(quiclysrc) != 0) {
-      g_printerr("Failed to send in fill\n");
+        g_printerr("Failed to send in create\n");
     }
   }
 
-  /* TODO: could add buffer metadata -> gst_buffer_add_net_address_meta(outbuf, saddr) */
-  GST_LOG_OBJECT (quiclysrc, "Filled buffer");
+  if (quiclysrc->transport_close)
+    goto end_stream;
+
+  GstBufferList *buf_list;
+  GstBuffer *out_buf = NULL;
+  
+  buf_list = gst_buffer_list_new_sized(quiclysrc->pushed);
+  for (int i = written; i < quiclysrc->pushed; i++) {
+    out_buf = gst_buffer_new();
+    gst_buffer_append_memory(out_buf, quiclysrc->mem_list[i]);
+    gst_memory_unmap(quiclysrc->mem_list[i], quiclysrc->map_list[i]);
+    quiclysrc->vec_list[i]->buffer = NULL;
+    quiclysrc->vec_list[i]->size = 0;
+    gst_buffer_resize(out_buf, 0, quiclysrc->pushed_list[i]);
+    quiclysrc->pushed_list[i] = 0;
+    gst_buffer_list_insert(buf_list, -1, out_buf);
+    quiclysrc->mem_list[i] = NULL;
+  }
+
+  gst_base_src_submit_buffer_list(base, buf_list);
+  quiclysrc->pushed = 0;
+  quiclysrc->mem_list_allocated = FALSE;
+  *buf = NULL;
+
   return GST_FLOW_OK;
 
   error:
     {
-      gst_buffer_unmap(buf, &info);
-      g_printerr("ERROR FILL\n");
-      GST_DEBUG_OBJECT(quiclysrc, "Error in fill");
+      g_printerr("ERROR CREATE\n");
+      GST_DEBUG_OBJECT(quiclysrc, "Error in create");
       g_clear_error(&err);
       return GST_FLOW_ERROR;
     }
   stopped:
     {
-      gst_buffer_unmap(buf, &info);
       g_printerr("FLUSHING...\n");
-      GST_DEBUG_OBJECT(quiclysrc, "FLUSHING in fill");
+      GST_DEBUG_OBJECT(quiclysrc, "FLUSHING in create");
       g_clear_error(&err);
       return GST_FLOW_FLUSHING;
     }
   end_stream:
     {
-      gst_buffer_unmap(buf, &info);
-      GST_DEBUG_OBJECT(quiclysrc, "End of Stream");
+      g_printerr("End of Stream...\n");
+      GST_DEBUG_OBJECT(quiclysrc, "End of stream in create");
       g_clear_error(&err);
       return GST_FLOW_EOS;
     }
 }
 
+/* buffer list version */
 static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len)
 {
   GstQuiclysrc *quiclysrc = GST_QUICLYSRC (*quicly_get_data(dgram->conn));
-  /*
-  rtp_hdr *hdr = (rtp_hdr *) src;
-  g_print("%i\n", hdr->seq_nr);
-  */
 
-  /* We already pushed a buffer from this packet, store this frame */
-  if (quiclysrc->pushed > 0) {
+  if (quiclysrc->pushed >= quiclysrc->mem_list_size) {
     quicly_dgrambuf_ingress_receive(dgram, src, len);
     return 0;
   }
-
-  /* write data to buffer */
-  if (quiclysrc->connected && (quiclysrc->ivec.size >= len)) {
-    memcpy(quiclysrc->ivec.buffer, src, len);
-    quiclysrc->pushed = len;
+  
+  if (quiclysrc->connected && (quiclysrc->vec_list[quiclysrc->pushed]->size >= len)) {
+    memcpy(quiclysrc->vec_list[quiclysrc->pushed]->buffer, src, len);
+    quiclysrc->pushed_list[quiclysrc->pushed] = len;
+    quiclysrc->pushed++;
 
     /* stats */
     ++quiclysrc->num_packets;
@@ -1030,12 +1136,6 @@ static int on_stop_sending(quicly_stream_t *stream, int err)
     return 0;
 }
 
-static int on_client_hello_cb(ptls_on_client_hello_t *_self, ptls_t *tls, ptls_on_client_hello_parameters_t *params)
-{
-  g_print("on_client_hello_cb. TODO\n");
-  return 0;
-}
-
 static int on_receive_reset(quicly_stream_t *stream, int err)
 {
     assert(QUICLY_ERROR_IS_QUIC_APPLICATION(err));
@@ -1109,7 +1209,6 @@ static gboolean gst_quiclysrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * q
 
   return TRUE;
 }
-
 
 static gboolean
 plugin_init (GstPlugin * plugin)

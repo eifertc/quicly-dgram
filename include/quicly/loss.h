@@ -275,8 +275,9 @@ inline void quicly_loss_on_ack_received(quicly_loss_t *r, uint64_t largest_newly
     uint64_t ack_delay_microsecs = ack_delay_encoded << *r->ack_delay_exponent;
     uint32_t ack_delay_millisecs = (uint32_t)((ack_delay_microsecs * 2 + 1000) / 2000);
     /* use min(ack_delay, max_ack_delay) as the ack delay */
-    if (ack_delay_millisecs > *r->max_ack_delay)
+    if (ack_delay_millisecs > *r->max_ack_delay) {
         ack_delay_millisecs = *r->max_ack_delay;
+    }
     quicly_rtt_update(&r->rtt, (uint32_t)(now - sent_at), ack_delay_millisecs);
 }
 
