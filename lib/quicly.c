@@ -937,7 +937,6 @@ int quicly_get_stats(quicly_conn_t *conn, quicly_stats_t *stats)
     /* set or generate the non-pre-built stats fields here */
     stats->rtt = conn->egress.loss.rtt;
     stats->cc = conn->egress.cc;
-    printf("BYTES IN FLIGHT: %lu\n", conn->egress.sentmap.bytes_in_flight);
     stats->bytes_in_flight = conn->egress.sentmap.bytes_in_flight;
 
     return 0;
@@ -1773,6 +1772,7 @@ int quicly_connect(quicly_conn_t **_conn, quicly_context_t *ctx, const char *ser
         ret = PTLS_ERROR_NO_MEMORY;
         goto Exit;
     }
+    conn->super.app_cc = 0;
     conn->super.peer.address_validation.validated = 1;
     conn->super.peer.address_validation.send_probe = 1;
     if (address_token.len != 0) {
@@ -2260,7 +2260,7 @@ static size_t calc_send_window(quicly_conn_t *conn, size_t min_bytes_to_send, in
 
 int64_t quicly_get_first_timeout(quicly_conn_t *conn)
 {
-    if (calc_send_window(conn, 0, 0) > 0) {
+    if ((calc_send_window(conn, 0, 0) > 0) || conn->super.app_cc) {
         if (conn->pending.flows != 0)
             return 0;
         if (quicly_linklist_is_linked(&conn->pending.streams.control))
@@ -2385,7 +2385,7 @@ static int commit_send_packet(quicly_conn_t *conn, quicly_send_context_t *s, int
     /* update CC, commit sentmap */
     if (s->target.ack_eliciting) {
         packet_bytes_in_flight = s->dst - s->target.first_byte_at;
-        s->send_window -= packet_bytes_in_flight;
+        s->send_window -= conn->super.app_cc ? 0 : packet_bytes_in_flight;
     } else {
         packet_bytes_in_flight = 0;
     }
@@ -2466,7 +2466,7 @@ static int _do_allocate_frame(quicly_conn_t *conn, quicly_send_context_t *s, siz
         if (s->num_packets >= s->max_packets)
             return QUICLY_ERROR_SENDBUF_FULL;
         s->send_window = round_send_window(s->send_window);
-        if (ack_eliciting && s->send_window < (ssize_t)min_space)
+        if (ack_eliciting && (s->send_window < (ssize_t)min_space) && (conn->super.app_cc == 0))
             return QUICLY_ERROR_SENDBUF_FULL;
         if ((s->target.packet = conn->super.ctx->packet_allocator->alloc_packet(conn->super.ctx->packet_allocator,
                                                                                 conn->super.ctx->max_packet_size)) == NULL)
@@ -3486,7 +3486,7 @@ static int do_send(quicly_conn_t *conn, quicly_send_context_t *s)
     }
 
     s->send_window = calc_send_window(conn, min_packets_to_send * conn->super.ctx->max_packet_size, restrict_sending);
-    if (s->send_window == 0) {
+    if ((s->send_window == 0) && (conn->super.app_cc == 0)) {
         ret = 0;
         goto Exit;
     }
@@ -3563,7 +3563,6 @@ static int do_send(quicly_conn_t *conn, quicly_send_context_t *s)
         }
         /* send DGRAM frames */
         if ((ret = quicly_send_dgram(conn, s)) != 0) {
-            //printf("DGRAM SEND != 0\n");
             goto Exit;
         }
         /* send STREAM frames */
@@ -4470,6 +4469,7 @@ int quicly_accept(quicly_conn_t **conn, quicly_context_t *ctx, struct sockaddr *
         ret = PTLS_ERROR_NO_MEMORY;
         goto Exit;
     }
+    (*conn)->super.app_cc = 0;
     (*conn)->super.state = QUICLY_STATE_CONNECTED;
     set_cid(&(*conn)->super.peer.cid, packet->cid.src);
     set_cid(&(*conn)->super.host.offered_cid, packet->cid.dest.encrypted);

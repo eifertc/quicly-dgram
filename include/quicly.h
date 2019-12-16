@@ -497,6 +497,8 @@ struct _st_quicly_conn_public_t {
         QUICLY_STATS_PREBUILT_FIELDS;
     } stats;
     uint32_t version;
+    /* Use application level congestion control if != 0 */
+    uint8_t app_cc;
     void *data;
 };
 
@@ -810,6 +812,10 @@ static void **quicly_get_data(quicly_conn_t *conn);
  */
 inline void quicly_set_data(quicly_conn_t *conn, void *data);
 /**
+ * Disable quic cc and use application level cc
+ */
+inline void quicly_set_application_cc(quicly_conn_t *conn, int set);
+/**
  * destroys a connection object.
  */
 void quicly_free(quicly_conn_t *conn);
@@ -1105,6 +1111,12 @@ inline void quicly_set_data(quicly_conn_t *conn, void *data)
 {
     struct _st_quicly_conn_public_t *c = (struct _st_quicly_conn_public_t *)conn;
     c->data = data;
+}
+
+inline void quicly_set_application_cc(quicly_conn_t *conn, int set)
+{
+    struct _st_quicly_conn_public_t *c = (struct _st_quicly_conn_public_t *)conn;
+    c->app_cc = set;
 }
 
 inline int quicly_stop_requested(quicly_stream_t *stream)

@@ -114,6 +114,7 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
 {
     AppData *data = (AppData *) user_data;
     GstStructure *stats;
+
     if (data->file_path) {
         /* Server stats */
 
@@ -710,6 +711,9 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
         g_object_set(rtpSink, "bind-port", sdata->port, 
                           "cert", sdata->cert_file,
                           "key", sdata->key_file, NULL);
+
+        if (sdata->scream)
+            g_object_set(rtpSink, "app-cc", TRUE, NULL);
 
         if (sdata->stream_mode)
             g_object_set(rtpSink, "stream-mode", TRUE, NULL);

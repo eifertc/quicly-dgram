@@ -304,6 +304,7 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
 
   quiclysrc->num_packets = 0;
   quiclysrc->num_bytes = 0;
+  quiclysrc->pushed = 0;
   quiclysrc->silent = FALSE;
   quiclysrc->connected = FALSE;
   quiclysrc->recv_buf = malloc(sizeof(gchar) * (2048 + 1));
@@ -680,6 +681,9 @@ gst_quiclysrc_stop (GstBaseSrc * src)
 
   GST_DEBUG_OBJECT(quiclysrc, "Stop. Packets received: %lu. Kilobytes received: %lu\n.", 
           quiclysrc->num_packets, quiclysrc->num_bytes / 1000);
+
+  g_print("Stop. Packets received: %lu. Kilobytes received: %lu\n.", 
+          quiclysrc->num_packets, quiclysrc->num_bytes / 1000);
   
   gst_quiclysrc_free_cancellable(quiclysrc);
 
@@ -853,7 +857,12 @@ static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
   gsize ret;
   GError *err = NULL;
 
-  /* Check if we have stored frames from previous receives. Should only happen in case of many packets much smaller than the mtu */
+  /**
+   * Check if we have stored frames from previous receives. 
+   * For dgrams, that should currently almost never happen, as we cap the amount of frames we receive
+   * in one run to the size of the buffer list.
+   * Only happens if the last packet we receive before the list is full contains multiple small frames.
+   */
   if (quiclysrc->dgram != NULL) {
     while ((quicly_dgram_can_get_data(quiclysrc->dgram)) > 0 && (written < quiclysrc->mem_list_size)) {
       gsize len = quiclysrc->vec_list[written]->size;
@@ -865,8 +874,29 @@ static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
       /* update stats */
       ++quiclysrc->num_packets;
       quiclysrc->num_bytes += len;
-
       quicly_dgrambuf_ingress_shift(quiclysrc->dgram, 1);
+    }
+  } else if (quiclysrc->stream != NULL) {
+    ptls_iovec_t input;
+    gboolean skip = FALSE;
+    while (((input = quicly_streambuf_ingress_get(quiclysrc->stream)).len != 0) && 
+                                            (written < quiclysrc->mem_list_size) && !skip) {
+      rtp_hdr_ *hdr = (rtp_hdr_*) input.base;
+      if ((hdr->framing <= (input.len - 2)) && (input.len >= 2) &&
+                      quiclysrc->vec_list[written]->size >= hdr->framing) {
+        memcpy(quiclysrc->vec_list[written]->buffer, input.base + 2, hdr->framing);
+        quiclysrc->pushed_list[written] = hdr->framing;
+        quiclysrc->pushed++;
+        written++;
+
+        /* update stats */
+        ++quiclysrc->num_packets;
+        quiclysrc->num_bytes += hdr->framing;
+        quicly_streambuf_ingress_shift(quiclysrc->stream, hdr->framing + 2);
+      } else {
+        /* skip, not a complete rtp package */
+        skip = TRUE;
+      }
     }
   }
 
@@ -908,14 +938,11 @@ static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
     }
   }
 
-  if (quiclysrc->transport_close)
-    goto end_stream;
-
   GstBufferList *buf_list;
   GstBuffer *out_buf = NULL;
   
   buf_list = gst_buffer_list_new_sized(quiclysrc->pushed);
-  for (int i = written; i < quiclysrc->pushed; i++) {
+  for (int i = 0; i < quiclysrc->pushed; i++) {
     out_buf = gst_buffer_new();
     gst_buffer_append_memory(out_buf, quiclysrc->mem_list[i]);
     gst_memory_unmap(quiclysrc->mem_list[i], quiclysrc->map_list[i]);
@@ -931,6 +958,9 @@ static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
   quiclysrc->pushed = 0;
   quiclysrc->mem_list_allocated = FALSE;
   *buf = NULL;
+
+  if (quiclysrc->transport_close)
+    goto end_stream;
 
   return GST_FLOW_OK;
 
@@ -1008,6 +1038,43 @@ static void send_caps_event(GstQuiclysrc *quiclysrc)
   }
 }
 
+static void handle_meta_data_stream(GstQuiclysrc *quiclysrc, quicly_stream_t *stream, ptls_iovec_t *input)
+{
+  char str[input->len];
+  memcpy(str, input->base, input->len);
+  GST_DEBUG_OBJECT(quiclysrc, "Received MSG string: %s", str);
+  char delim[] = ":;\n";
+  char *token;
+  char check[] = "DATA";
+  GstStructure *cp;
+  GstCaps *_caps;
+  gboolean found = FALSE;
+
+  token = strtok(str, delim);
+
+  while (token != NULL) {
+    if (found) {
+      if ((cp = gst_structure_from_string(token, NULL)) == NULL) {
+        /* Didn't get the whole caps string or broken. Skip */
+        return;
+      }
+      if (((_caps = gst_caps_new_full(cp, NULL)) != NULL) && GST_IS_CAPS(_caps)) {
+        if (quiclysrc->caps)
+          gst_caps_unref(quiclysrc->caps);
+        quiclysrc->caps = _caps;
+        send_caps_event(quiclysrc);
+        GST_INFO_OBJECT(quiclysrc, "Caps received: %s", gst_caps_to_string(_caps));
+      }
+      break;
+    }
+    if (strcmp(token, check) == 0)
+      found = TRUE;
+    token = strtok(NULL, delim);
+  }
+  g_print("SKIPPING STUFF\n");
+  quicly_streambuf_ingress_shift(stream, input->len);
+}
+
 /*
  * Would be better to differentiate by stream id. e.g. always send caps on stream id 1
  * TODO: Regardless -> split the function up
@@ -1016,78 +1083,57 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
 {
   GstQuiclysrc *quiclysrc = GST_QUICLYSRC (*quicly_get_data(stream->conn));
   ptls_iovec_t input;
-  char msg[] = "MSG";
   int ret;
 
   if ((ret = quicly_streambuf_ingress_receive(stream, off, src, len)) != 0)
     return ret;
 
   if ((input = quicly_streambuf_ingress_get(stream)).len != 0) {
-    char head[4] = {input.base[0], input.base[1], input.base[2], '\0'};
-    if (strcmp(head, msg) == 0) {
-      char str[input.len];
-      memcpy(str, input.base, input.len);
-      GST_DEBUG_OBJECT(quiclysrc, "Received MSG string: %s", str);
-      char delim[] = ":;\n";
-      char *token;
-      char check[] = "DATA";
-      GstStructure *cp;
-      GstCaps *_caps;
-      gboolean found = FALSE;
-
-      token = strtok(str, delim);
-
-      while (token != NULL) {
-        if (found) {
-          if ((cp = gst_structure_from_string(token, NULL)) == NULL) {
-            /* Didn't get the whole caps string or broken. Skip */
-            return 0;
-          }
-          if (((_caps = gst_caps_new_full(cp, NULL)) != NULL) && GST_IS_CAPS(_caps)) {
-            if (quiclysrc->caps)
-              gst_caps_unref(quiclysrc->caps);
-            quiclysrc->caps = _caps;
-            send_caps_event(quiclysrc);
-            GST_INFO_OBJECT(quiclysrc, "Caps received: %s", gst_caps_to_string(_caps));
-          }
-          break;
-        }
-        if (strcmp(token, check) == 0)
-          found = TRUE;
-        token = strtok(NULL, delim);
-      }
-      quicly_streambuf_ingress_shift(stream, input.len);
-    } else {
-      rtp_hdr_ *hdr = (rtp_hdr_*) input.base;
-      uint8_t version = hdr->ver_p_x_cc >> 6;
-      if (version != 2) {
-        /* Not an rtp packet with stream framing. Skip */
+    if (quiclysrc->stream != stream) {
+      char msg[] = "MSG";
+      char head[4] = {input.base[0], input.base[1], input.base[2], '\0'};
+      if (strcmp(head, msg) == 0) {
+        /* Meta data stream */
+        handle_meta_data_stream(quiclysrc, stream, &input);
         return 0;
-      }
-
-      /* else: data stream */
-      if (quiclysrc->stream == NULL)
-        quiclysrc->stream = stream;
-
-      /* already pushed to this buffer, skip */
-      if (quiclysrc->pushed)
-        return 0;
-      
-      if ((hdr->framing <= (input.len - 2)) && (input.len >= 2)) {
-        if (quiclysrc->connected && (quiclysrc->ivec.size >= len)) {
-          memcpy(quiclysrc->ivec.buffer, input.base + 2, hdr->framing);
-          quiclysrc->pushed = hdr->framing;
-          /* stats */
-          ++quiclysrc->num_packets;
-          quiclysrc->num_bytes += hdr->framing;
-          quicly_streambuf_ingress_shift(stream, hdr->framing + 2);
-        }
       } else {
-        /* skip, not a complete rtp packet */
-        return 0;
+        /* New media data stream */
+        quiclysrc->stream = stream;
       }
     }
+
+    rtp_hdr_ *hdr = (rtp_hdr_*) input.base;
+    uint8_t version = hdr->ver_p_x_cc >> 6;
+    if (version != 2) {
+      /* Not an rtp packet with stream framing. Skip */
+      g_printerr("ILLEGAL PACKET FORMAT\n");
+      return 0;
+    }
+
+    if (quiclysrc->pushed >= quiclysrc->mem_list_size) {
+      /* skip, buffer list full */
+      return 0;
+    }
+    
+    /* Check if we can get a complete rtp packet */
+    if ((hdr->framing <= (input.len - 2)) && (input.len >= 2)) {
+      /* Check if the current buffer has enough space. Should always be true, if we set rtp payloader to 1200bytes */
+      if (quiclysrc->connected && (quiclysrc->vec_list[quiclysrc->pushed]->size >= hdr->framing)) {
+        memcpy(quiclysrc->vec_list[quiclysrc->pushed]->buffer, input.base + 2, hdr->framing);
+        quiclysrc->pushed_list[quiclysrc->pushed] = hdr->framing;
+        quiclysrc->pushed++;
+        /* stats */
+        ++quiclysrc->num_packets;
+        quiclysrc->num_bytes += hdr->framing;
+        quicly_streambuf_ingress_shift(stream, hdr->framing + 2);
+      }
+    } else {
+      /* skip, not a complete rtp packet */
+      g_print("RECEIVED. NOT COMPLETE RTP\n");
+      return 0;
+    }
   }
+
   return 0;
 }
 

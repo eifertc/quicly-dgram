@@ -84,6 +84,7 @@ struct _GstQuiclysink
   quicly_stats_t stats;
 
   gboolean auto_caps_exchange;
+  gboolean application_cc;
 };
 
 struct _GstQuiclysinkClass
