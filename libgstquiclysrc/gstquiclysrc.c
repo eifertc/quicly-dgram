@@ -662,7 +662,7 @@ static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc)
       "packets-received", G_TYPE_UINT64, stats.num_packets.received,
       "packets-sent", G_TYPE_UINT64, stats.num_packets.sent,
       "packets-lost", G_TYPE_UINT64, stats.num_packets.lost,
-      "acks-received", G_TYPE_UINT64, stats.num_packets.ack_received,
+      "acks-received", G_TYPE_UINT64, stats.num_packets.acked,
       "bytes-received", G_TYPE_UINT64, stats.num_bytes.received,
       "bytes-sent", G_TYPE_UINT64, stats.num_bytes.sent,
       "rtt-smoothed", G_TYPE_UINT, stats.rtt.smoothed,

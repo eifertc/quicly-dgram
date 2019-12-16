@@ -209,10 +209,10 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT] =
     g_signal_new("on-feedback-report", G_TYPE_FROM_CLASS(klass),
     G_SIGNAL_RUN_LAST, G_STRUCT_OFFSET(GstQuiclysinkClass, on_feedback_report),
-    NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 11,
-    G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT, G_TYPE_UINT,
+    NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 10,
     G_TYPE_UINT64, G_TYPE_UINT64, G_TYPE_UINT64, G_TYPE_UINT64,
-    G_TYPE_UINT64, G_TYPE_UINT64, G_TYPE_UINT64);
+    G_TYPE_UINT64, G_TYPE_UINT64, G_TYPE_UINT64, G_TYPE_UINT64,
+    G_TYPE_UINT64, G_TYPE_UINT);
 
   gobject_class->set_property = gst_quiclysink_set_property;
   gobject_class->get_property = gst_quiclysink_get_property;
@@ -545,13 +545,15 @@ static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink)
       "packets-received", G_TYPE_UINT64, stats.num_packets.received,
       "packets-sent", G_TYPE_UINT64, stats.num_packets.sent,
       "packets-lost", G_TYPE_UINT64, stats.num_packets.lost,
-      "acks-received", G_TYPE_UINT64, stats.num_packets.ack_received,
+      "acks-received", G_TYPE_UINT64, stats.num_packets.acked,
       "bytes-received", G_TYPE_UINT64, stats.num_bytes.received,
       "bytes-sent", G_TYPE_UINT64, stats.num_bytes.sent,
       "rtt-smoothed", G_TYPE_UINT, stats.rtt.smoothed,
       "rtt-latest", G_TYPE_UINT, stats.rtt.latest,
       "rtt-minimum", G_TYPE_UINT, stats.rtt.minimum,
-      "rtt-variance", G_TYPE_UINT, stats.rtt.variance, NULL);
+      "rtt-variance", G_TYPE_UINT, stats.rtt.variance,
+      "bytes-in-flight", G_TYPE_UINT64, stats.bytes_in_flight,
+      "cwnd", G_TYPE_UINT, stats.cc.cwnd, NULL);
 
   return s;
 }
@@ -605,13 +607,21 @@ inline static void emit_feedback_signal(GstQuiclysink *quiclysink)
 {
   /* get quicly feedback */
   quiclysink->fb_timeout = quiclysink->ctx.now->cb(quiclysink->ctx.now);
+  /*
   quicly_get_feedback(quiclysink->conn, &quiclysink->feedback);
-
   g_signal_emit(quiclysink, quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT], 0,
     quiclysink->feedback.rtt_minimum, quiclysink->feedback.rtt_smoothed, 
     quiclysink->feedback.rtt_latest, quiclysink->feedback.cwnd, quiclysink->feedback.bytes_in_flight,
     quiclysink->feedback.bytes_sent, quiclysink->feedback.bytes_lost, quiclysink->feedback.bytes_acked,
     quiclysink->feedback.packets_sent, quiclysink->feedback.packets_lost, quiclysink->feedback.packets_acked);
+  */
+  g_print("BYTES: %lu\n", quiclysink->stats.bytes_in_flight);
+  quicly_get_stats(quiclysink->conn, &quiclysink->stats);
+  g_signal_emit(quiclysink, quiclysink_signals[SIGNAL_ON_FEEDBACK_REPORT], 0,
+    quiclysink->stats.num_packets.sent, quiclysink->stats.num_packets.lost, quiclysink->stats.num_packets.acked, 
+    quiclysink->stats.num_bytes.sent, quiclysink->stats.num_bytes.lost, quiclysink->stats.num_bytes.acked, 
+    quiclysink->stats.timestamp.latest_ack_send_time, quiclysink->stats.timestamp.latest_ack_recv_time, 
+    quiclysink->stats.cc.cwnd, quiclysink->stats.bytes_in_flight);
 }
 
 /* TODO: Use only one function. e.g. call the same function from render and
@@ -661,8 +671,8 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
   gst_buffer_unmap(buffer, &map);
 
   /* Emit feedback every ~10ms */
-  if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > 50)
-    emit_feedback_signal(quiclysink);
+  //if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > 50)
+  //  emit_feedback_signal(quiclysink);
 
   return GST_FLOW_OK;
 }
@@ -732,8 +742,8 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
   }
 
   /* Emit feedback every ~10ms */
-  if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > 50)
-    emit_feedback_signal(quiclysink);
+  //if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > 50)
+  //  emit_feedback_signal(quiclysink);
 
   return flow;
 }

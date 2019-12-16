@@ -81,6 +81,7 @@ struct _GstQuiclysink
 
   gint64 fb_timeout; /* reference time for feedback signal emit */
   quicly_feedback_t feedback;
+  quicly_stats_t stats;
 
   gboolean auto_caps_exchange;
 };

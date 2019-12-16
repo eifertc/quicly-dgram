@@ -8,12 +8,14 @@
 #include <pthread.h>
 #include <gst/rtp/rtp.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <gst/rtp/gstrtpbuffer.h>
 #include <gst/rtp/gstrtcpbuffer.h>
 
+#define STAT_TIME_NS 1000000000 /* get stats every second */
+
 int rtp_packet_num = 0;
 gssize rtp_bytes = 0;
-FILE *fPtr = NULL;
 int prev_seq = 0;
 int packets_lost = 0;
 int num_buffers = 0;
@@ -33,13 +35,21 @@ uint64_t avg_time = 0;
 uint64_t num_buffers_rtp = 0;
 uint64_t highest_jit = 0;
 
+typedef struct {
+    GstElement *net;
+    GstElement *session;
+    GstElement *jitterbuf;
+    GObject *internal_session;
+    GstClockID clockId;
+} Gst_elements;
+
 typedef struct _AppData
 {
     gchar *file_path;
     gchar *cert_file;
     gchar *key_file;
     gchar *host;
-    gchar *logfile;
+    FILE *stat_file_path;
     gint port;
     gboolean headless;
     gboolean stream_mode;
@@ -51,7 +61,7 @@ typedef struct _AppData
     gboolean aux;
     gboolean scream;
     gboolean camera;
-    GstElement *jitterbuf;
+    Gst_elements elements;
 } AppData;
 
 typedef struct _SessionData
@@ -100,10 +110,110 @@ inline uint64_t get_time() {
     return t.tv_sec * (int)1e6 + t.tv_usec;
 }
 
-gboolean timer_stat_event(GstClock *clock, GstClockTime t, GstClockID id, gpointer user_data) 
+gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer user_data)
 {
+    AppData *data = (AppData *) user_data;
+    GstStructure *stats;
+    if (data->file_path) {
+        /* Server stats */
+
+        if (data->udp) {
+            guint64 bytes_sent, packets_sent;
+            g_signal_emit_by_name(data->elements.net, "get-stats", 
+                                    data->host, data->port, &stats);
+            gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
+            gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
+            gst_structure_free(stats);
+
+            fprintf(data->stat_file_path, "%lu, %lu\n", packets_sent, bytes_sent);
+        } else {
+            guint64 packets_sent, packets_received, packets_lost, 
+                    bytes_received, bytes_sent, bytes_in_flight;
+            guint srtt, cwnd;
+            g_object_get(data->elements.net, "stats", &stats, NULL);
+            gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
+            gst_structure_get_uint64(stats, "packets-lost", &packets_lost);
+            gst_structure_get_uint64(stats, "packets-received", &packets_received);
+            //gst_structure_get_uint64(stats, "acks-received", &acks_received); /* Would be just the amount of packets without ack eliciting frames send from the receiver */
+            gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
+            gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
+            gst_structure_get_uint64(stats, "bytes-in-flight", &bytes_in_flight);
+            gst_structure_get_uint(stats, "rtt-smoothed", &srtt);
+            gst_structure_get_uint(stats, "cwnd", &cwnd);
+            gst_structure_free(stats);
+
+            fprintf(data->stat_file_path, "%lu, %lu, %lu, %lu, %lu, %lu, %u, %u\n", 
+                    packets_sent, packets_lost, packets_received, bytes_sent, bytes_received, bytes_in_flight, srtt, cwnd);
+        }
+    } else {
+        /* Client stats */
+        if (!data->elements.jitterbuf) {
+            /* Bail out if pipeline has not been fully created yet */
+            return TRUE;
+        }
+
+        /* Jitterbuffer */
+        g_object_get(data->elements.jitterbuf, "stats", &stats, NULL);
+        guint64 pushed, rtp_lost, late, jitbuf_jitter;
+        gst_structure_get_uint64(stats, "num-pushed", &pushed);
+        gst_structure_get_uint64(stats, "num-lost", &rtp_lost);
+        gst_structure_get_uint64(stats, "num-late", &late);
+        //gst_structure_get_uint64(stats, "num-duplicate", &dup); /* weird number TODO: fix*/
+        gst_structure_get_uint64(stats, "avg-jitter", &jitbuf_jitter);
+        gst_structure_free(stats);
+
+        /* RtpSource */
+        GValueArray *arr = NULL;
+        gboolean internal;
+        guint rtpsrc_jitter = 0;
+        guint64 bitrate = 0;
+        g_object_get(data->elements.internal_session, "sources", &arr, NULL);
+        if (arr) {
+            for (int i = 0; i < arr->n_values; i++) {
+                GObject *rtpsrc;
+                rtpsrc = g_value_get_object(arr->values + i);
+                g_object_get(rtpsrc, "stats", &stats, NULL);
+                gst_structure_get_boolean(stats, "internal", &internal);
+                if (!internal) {
+                    gst_structure_get_uint(stats, "jitter", &rtpsrc_jitter);
+                    gst_structure_get_uint64(stats, "bitrate", &bitrate);
+                }
+                gst_structure_free(stats);
+            }
+        }
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        g_value_array_free(arr);
+        #pragma GCC diagnostic pop
+
+        if (data->udp) {
+            fprintf(data->stat_file_path, "%lu, %lu, %lu, %lu, %u, %lu\n", pushed, rtp_lost, late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
+        } else {
+            /* quicly */
+            g_object_get(data->elements.net, "stats", &stats, NULL);
+            guint64 packets_sent, packets_lost, packets_received, bytes_sent, bytes_received;
+            gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
+            gst_structure_get_uint64(stats, "packets-lost", &packets_lost);
+            gst_structure_get_uint64(stats, "packets-received", &packets_received);
+            gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
+            gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
+            gst_structure_free(stats);
+            fprintf(data->stat_file_path, "%lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu, %u, %lu\n", 
+                    packets_sent, packets_lost, packets_received, bytes_sent, bytes_received, pushed, rtp_lost, late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
+        }
+    }
 
     return TRUE;
+}
+
+void create_stat_collection_callback(GstPipeline *pipe, AppData *data)
+{
+    GstClock *clock = gst_pipeline_get_clock(pipe);
+    data->elements.clockId = gst_clock_new_periodic_id(clock, gst_clock_get_internal_time(clock), STAT_TIME_NS);
+    if (!data->elements.clockId)
+        g_print("Could not setup periodic clock\n");
+    if (gst_clock_id_wait_async(data->elements.clockId, cb_print_stats, data, NULL) != GST_CLOCK_OK)
+        g_print("Could not register periodic stats callback");
 }
 
 //static void on_stream_status(GstBus *bus, GstMessage *msg, gpointer user_data)
@@ -269,6 +379,9 @@ static GstPadProbeReturn cb_udp_first_packet(GstPad *pad, GstPadProbeInfo *info,
     return GST_PAD_PROBE_REMOVE;
 }
 
+/**
+ * Debug. Inspect buffer lists passed along the gstreamer pipeline
+ */
 static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     GstMapInfo map;
@@ -321,6 +434,9 @@ static GstPadProbeReturn cb_inspect_buf_list(GstPad *pad, GstPadProbeInfo *info,
     return GST_PAD_PROBE_OK;
 }
 
+/**
+ * Debug. Inspect buffers passed along the gstreamer pipeline
+ */
 static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     
@@ -384,13 +500,13 @@ static GstPadProbeReturn cb_inspect_buf(GstPad *pad, GstPadProbeInfo *info, gpoi
  * TODO: Report only the newly lost ones.
  */ 
 static void 
-cb_on_feedback_report(GstElement *ele, guint32 minrtt, guint32 lrtt, guint32 srtt, 
-                      guint32 cwnd, guint64 bytes_in_flight, guint64 bytes_sent,
-                      guint64 bytes_lost, guint64 bytes_acked,
-                      guint64 packets_sent, guint64 packets_lost, 
-                      guint64 packets_acked, gpointer user_data)
+cb_on_feedback_report(GstElement *ele, 
+                      guint64 packets_sent, guint64 packets_lost, guint64 packets_acked,
+                      guint64 bytes_sent, guint64 bytes_lost, guint64 bytes_acked,
+                      guint64 latest_ack_send_time, guint64 latest_ack_recv_time,
+                      guint64 bytes_in_flight, guint32 cwnd, gpointer user_data)
 {
-    g_print("Bytes_in_flight: %lu. Cwnd: %u\n", bytes_in_flight, cwnd);
+    g_print("Diff: %lu\n", latest_ack_recv_time - latest_ack_send_time);
 }
 
 static void on_pad_added(GstElement *ele, GstPad *pad, gpointer data)
@@ -412,8 +528,8 @@ static void
 cb_new_jitterbuf(GstBin *rtpbin, GstElement *jitterbuf, guint session, guint ssrc, gpointer data)
 {
     AppData *adata = (AppData *) data;
-    if (!adata->jitterbuf)
-        adata->jitterbuf = jitterbuf;
+    if (!adata->elements.jitterbuf)
+        adata->elements.jitterbuf = jitterbuf;
 }
 
 static GstCaps *
@@ -602,6 +718,7 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
             g_signal_connect(rtpSink, "on-feedback-report", G_CALLBACK(cb_on_feedback_report), NULL);
         }
     }
+    sdata->elements.net = rtpSink;
 
     if (sdata->rtcp) {
         GstElement *rtcpSink = gst_element_factory_make ("udpsink", NULL);
@@ -798,31 +915,31 @@ int run_server(AppData *sdata)
 
     GstElement *session;
     g_signal_emit_by_name(rtpBin, "get-session", 0, &session);
+    GObject *int_session;
+    g_signal_emit_by_name(rtpBin, "get-internal-session", 0, &int_session);
+    sdata->elements.session = session;
+    sdata->elements.internal_session = int_session;
 
-    if (sdata->rtcp) {
-        GObject *int_session;
-        g_signal_emit_by_name(rtpBin, "get-internal-session", 0, &int_session);
+
+    if (sdata->rtcp && sdata->debug) {
         //g_signal_connect(int_session, "on_receiving_rtcp", G_CALLBACK(cb_on_recv_rtcp), NULL);
         //g_signal_connect(int_session, "on_send_rtcp", G_CALLBACK(cb_on_send_rtcp), NULL);
     }
-
-    /* Gather statistics periodically */
-    /*
-    GstClockID clockId;
-    GstClock *clock = gst_pipeline_get_clock((GstPipeline*) pipe);
-    clockId = gst_clock_new_periodic_id(clock, gst_clock_get_internal_time(clock), PACE_CLOCK_T_NS);
-    g_assert(filter->clockId);
-    GstClockReturn t = gst_clock_id_wait_async(clockId, timer_stat_event, (gpointer) int_session, NULL);
-    */
 
     /* start the pipeline */
     g_print("Stream started...\n");
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_PLAYING);
 
+    /* Gather statistics periodically */
+    if (sdata->stat_file_path) 
+        create_stat_collection_callback(pipe, sdata);
+
     g_main_loop_run(loop);
 
     /* Out of the main loop */
     g_print ("Pipeline stopping.\n");
+    if (sdata->stat_file_path)
+        gst_clock_id_unref(sdata->elements.clockId);
 
     /* Print payloader stats */
     GstStructure *stats;
@@ -905,6 +1022,7 @@ add_client_stream(GstElement *pipe, GstElement *rtpBin, SessionData *session, Ap
         rtpSrc = gst_element_factory_make("quiclysrc", "rtpsrc");
         g_object_set(G_OBJECT(rtpSrc), "host", adata->host, "port", adata->port, NULL);
     }
+    adata->elements.net = rtpSrc;
 
     if (adata->rtcp) {
         GstElement *rtcpSrc = gst_element_factory_make("udpsrc", NULL);
@@ -1046,21 +1164,30 @@ int run_client(AppData *cdata)
     g_signal_emit_by_name(rtpBin, "get-session", 0, &session);
     GObject *int_session;
     g_signal_emit_by_name(rtpBin, "get-internal-session", 0, &int_session);
+    cdata->elements.session = session;
+    cdata->elements.internal_session = int_session;
 
     /* start the pipeline */
     //g_print("APPLICATION THREAD ID: %ld\n", pthread_self());
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_PLAYING);
 
+    /* Setup callback for continous stat receive */
+    if (cdata->stat_file_path) {
+        create_stat_collection_callback(pipe, cdata);
+    }
+
     g_main_loop_run(loop);
 
     /* Out of the main loop, clean up nicely */
     g_print ("Pipeline stopping.\n");
+    if (cdata->stat_file_path)
+        gst_clock_id_unref(cdata->elements.clockId);
     
     //stats
     GstStructure *stats;
     gchar *str;
-    if (cdata->jitterbuf) {
-        g_object_get(cdata->jitterbuf, "stats", &stats, NULL);
+    if (cdata->elements.jitterbuf) {
+        g_object_get(cdata->elements.jitterbuf, "stats", &stats, NULL);
         str = gst_structure_to_string(stats);
         g_print("##### Jitterbuffer stats:\n%s\n", str);
         gst_structure_free(stats);
@@ -1075,16 +1202,13 @@ int run_client(AppData *cdata)
         GValueArray *arr = NULL;
         g_object_get(int_session, "sources", &arr, NULL);
 
-        GValue *val;
         gboolean internal;
         if (arr) {
             for (int i = 0; i < arr->n_values; i++) {
                 GObject *rtpsrc;
-
-                val = g_value_array_get_nth(arr, i);
-                rtpsrc = g_value_get_object(val);
+                rtpsrc = g_value_get_object(arr->values + i);
                 g_object_get(rtpsrc, "stats", &stats, NULL);
-
+                g_print("RTPSRC NUMBER: %i\n", i);
                 gst_structure_get_boolean(stats, "internal", &internal);
                 if (!internal) {
                     guint jitter;
@@ -1099,6 +1223,10 @@ int run_client(AppData *cdata)
                 }
             }
         }
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        g_value_array_free(arr);
+        #pragma GCC diagnostic pop
     }
 
     if(!cdata->udp) {
@@ -1121,7 +1249,6 @@ int run_client(AppData *cdata)
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_NULL);
 
     g_print("Deleting pipeline\n");
-    //gst_object_unref (bus2);
     gst_object_unref (GST_OBJECT(pipe));
     g_main_loop_unref(loop);
 
@@ -1146,9 +1273,10 @@ int main (int argc, char *argv[])
     data.camera = FALSE;
     data.file_path = NULL;
     data.cert_file = NULL;
-    data.key_file = NULL;
-    data.logfile = NULL;
-    data.jitterbuf = NULL;
+    data.key_file = NULL;;
+    data.elements.jitterbuf = NULL;
+    data.stat_file_path = NULL;
+    gchar *logfile = NULL;
     GOptionContext *ctx;
     GError *err = NULL;
     gchar *plugins = NULL;
@@ -1184,8 +1312,8 @@ int main (int argc, char *argv[])
          "Port to connect to", NULL},
         {"headless", 'H', 0, G_OPTION_ARG_NONE, &data.headless,
          "Client. Use fakesink", NULL},
-        {"logfile", 'l', 0, G_OPTION_ARG_STRING, &data.logfile,
-         "Use specified logfile", NULL}, 
+        {"logfile", 'l', 0, G_OPTION_ARG_STRING, &logfile,
+         "Log stats. Filepath or stdout", NULL}, 
         {NULL}
     };
 
@@ -1203,7 +1331,7 @@ int main (int argc, char *argv[])
 
     gst_init(NULL, NULL);
 
-    /* SET PLUGIN PATH */
+    /* Set custom plugin path */
     if (plugins == NULL)
         plugins = "./libgst";
     GstRegistry *reg;
@@ -1213,13 +1341,34 @@ int main (int argc, char *argv[])
     gst_registry_scan_path(reg, "../../scream/code/gscream/gst-gscreamtx/gst-plugin/src/.libs");
     gst_registry_scan_path(reg, "../../scream/code/gscream/gst-gscreamrx/gst-plugin/src/.libs");
 
-    if (data.logfile != NULL) {
-        fPtr = g_fopen(data.logfile, "a");
-
-        if (fPtr == NULL)
-            g_printerr("Could not open log file. Err: %s\n", strerror(errno));
+    if (logfile != NULL) {
+        if (strcmp(logfile, "stdout") == 0) {
+            data.stat_file_path = stdout;
+        } else {
+            data.stat_file_path = fopen(logfile, "a");
+            if (data.stat_file_path == NULL) {
+                g_printerr("Could not open file. Err: %s\n", strerror(errno));
+                return -1;
+            }
+            /* Print application info */
+            fprintf(data.stat_file_path, "#%s, Transport: %s, CC: %s\n", data.file_path ? "Server" : "Client", data.udp ? "UDP" : "QUIC", data.scream ? "Scream" : "None");
+            if (data.file_path) {
+                /* Print value explanation for server */
+                if (data.udp)
+                    fprintf(data.stat_file_path, "#packets-sent, bytes-sent\n");
+                else
+                    fprintf(data.stat_file_path, "#packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, bytes-in-flight, srtt, cwnd\n");
+            } else {
+                /* Print value explanation for client */
+                if (data.udp)
+                    fprintf(data.stat_file_path, "#jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                else
+                    fprintf(data.stat_file_path, "#packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, \
+                                                  jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+            }
+        }
+        g_free(logfile);
     }
-
     /* handle different modes */
     if (data.scream) {
         data.rtcp = data.udp ? TRUE : FALSE;
@@ -1237,6 +1386,9 @@ int main (int argc, char *argv[])
         g_printerr("Init failed. Exit...\n");
         return 1;
     }
+
+    if (data.stat_file_path)
+        fclose(data.stat_file_path);
 
     return 0;
 }

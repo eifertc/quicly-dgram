@@ -381,14 +381,18 @@ struct st_quicly_conn_streamgroup_state_t {
         uint64_t received;                                                                                                         \
         uint64_t sent;                                                                                                             \
         uint64_t lost;                                                                                                             \
-        uint64_t ack_received;                                                                                                     \
+        uint64_t acked;                                                                                                            \
     } num_packets;                                                                                                                 \
     struct {                                                                                                                       \
         uint64_t received;                                                                                                         \
         uint64_t sent;                                                                                                             \
         uint64_t lost;                                                                                                             \
         uint64_t acked;                                                                                                            \
-    } num_bytes
+    } num_bytes;                                                                                                                   \
+    struct {                                                                                                                       \
+        uint64_t latest_ack_send_time;                                                                                             \
+        uint64_t latest_ack_recv_time;                                                                                             \
+    } timestamp
 
 typedef struct st_quicly_stats_t {
     /**
@@ -403,6 +407,10 @@ typedef struct st_quicly_stats_t {
      * Congestion control (experimental; TODO cherry-pick what can be exposed as part of a stable API)
      */
     quicly_cc_t cc;
+    /**
+     * bytes_in_flight
+     */
+    size_t bytes_in_flight;
 } quicly_stats_t;
 
 typedef struct st_quicly_feedback_t {
@@ -417,6 +425,8 @@ typedef struct st_quicly_feedback_t {
     uint64_t packets_sent;
     uint64_t packets_lost;
     uint64_t packets_acked;
+    uint64_t latest_ack_send_time;
+    uint64_t latest_ack_recv_time;
 } quicly_feedback_t;
 
 /**

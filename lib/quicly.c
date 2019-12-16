@@ -923,7 +923,7 @@ int quicly_get_feedback(quicly_conn_t *conn, quicly_feedback_t *fb)
     fb->bytes_lost = conn->super.stats.num_bytes.lost;
     fb->packets_sent = conn->super.stats.num_packets.sent;
     fb->packets_lost = conn->super.stats.num_packets.lost;
-    fb->packets_acked = conn->super.stats.num_packets.ack_received;
+    fb->packets_acked = conn->super.stats.num_packets.acked;
     fb->bytes_acked = conn->super.stats.num_bytes.acked;
 
     return 0;
@@ -937,6 +937,8 @@ int quicly_get_stats(quicly_conn_t *conn, quicly_stats_t *stats)
     /* set or generate the non-pre-built stats fields here */
     stats->rtt = conn->egress.loss.rtt;
     stats->cc = conn->egress.cc;
+    printf("BYTES IN FLIGHT: %lu\n", conn->egress.sentmap.bytes_in_flight);
+    stats->bytes_in_flight = conn->egress.sentmap.bytes_in_flight;
 
     return 0;
 }
@@ -3909,7 +3911,11 @@ static int handle_ack_frame(quicly_conn_t *conn, struct st_quicly_handle_payload
             do {
                 const quicly_sent_packet_t *sent;
                 if ((sent = quicly_sentmap_get(&iter))->packet_number == packet_number) {
-                    ++conn->super.stats.num_packets.ack_received;
+                    if (packet_number == frame.largest_acknowledged) {
+                        conn->super.stats.timestamp.latest_ack_send_time = sent->sent_at;
+                        conn->super.stats.timestamp.latest_ack_recv_time = frame.receive_time;
+                    }
+                    ++conn->super.stats.num_packets.acked;
                     conn->super.stats.num_bytes.acked += sent->bytes_in_flight;
                     if (state->epoch == sent->ack_epoch) {
                         largest_newly_acked.packet_number = packet_number;
