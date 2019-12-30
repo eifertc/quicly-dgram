@@ -552,6 +552,7 @@ gst_quiclysink_start (GstBaseSink * sink)
 static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink)
 {
   GstStructure *s;
+  GST_OBJECT_LOCK(quiclysink);
   s = gst_structure_new("quiclysink-stats",
       "packets-received", G_TYPE_UINT64, quiclysink->stats.num_packets.received,
       "packets-sent", G_TYPE_UINT64, quiclysink->stats.num_packets.sent,
@@ -565,21 +566,7 @@ static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink)
       "rtt-variance", G_TYPE_UINT, quiclysink->stats.rtt.variance,
       "bytes-in-flight", G_TYPE_UINT64, quiclysink->stats.bytes_in_flight,
       "cwnd", G_TYPE_UINT, quiclysink->stats.cc.cwnd, NULL);
-  /*
-  s = gst_structure_new("quiclysink-stats",
-      "packets-received", G_TYPE_UINT64, stats.num_packets.received,
-      "packets-sent", G_TYPE_UINT64, stats.num_packets.sent,
-      "packets-lost", G_TYPE_UINT64, stats.num_packets.lost,
-      "acks-received", G_TYPE_UINT64, stats.num_packets.acked,
-      "bytes-received", G_TYPE_UINT64, stats.num_bytes.received,
-      "bytes-sent", G_TYPE_UINT64, stats.num_bytes.sent,
-      "rtt-smoothed", G_TYPE_UINT, stats.rtt.smoothed,
-      "rtt-latest", G_TYPE_UINT, stats.rtt.latest,
-      "rtt-minimum", G_TYPE_UINT, stats.rtt.minimum,
-      "rtt-variance", G_TYPE_UINT, stats.rtt.variance,
-      "bytes-in-flight", G_TYPE_UINT64, stats.bytes_in_flight,
-      "cwnd", G_TYPE_UINT, stats.cc.cwnd, NULL);
-  */
+  GST_OBJECT_UNLOCK(quiclysink);
   return s;
 }
 
@@ -596,7 +583,7 @@ gst_quiclysink_stop (GstBaseSink * sink)
   g_print("Stop. Num Packets sent: %lu. Kilobytes sent: %lu.\n", 
           quiclysink->num_packets, quiclysink->num_bytes / 1000);
 
-  //g_print("PACKETS IN BUFFER: %lu\n", quicly_dgram_debug(quiclysink->dgram));
+  g_print("Stop2. Buffers left: %lu\n", quicly_dgram_debug(quiclysink->dgram));
 
   if (quicly_close(quiclysink->conn, 0, "") != 0)
     g_printerr("Error on close. Unclean shutdown\n");

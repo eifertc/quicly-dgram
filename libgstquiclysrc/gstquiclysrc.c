@@ -80,6 +80,8 @@ static gboolean gst_quiclysrc_stop (GstBaseSrc * src);
 static gboolean gst_quiclysrc_unlock (GstBaseSrc * src);
 static gboolean gst_quiclysrc_unlock_stop (GstBaseSrc * src);
 static gboolean gst_quiclysrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * query);
+static gboolean gst_quiclysrc_set_clock(GstElement *ele, GstClock *clock);
+gboolean send_async_ack_cb(GstClock *clock, GstClockTime t, GstClockID id, gpointer data);
 
 // buffer list
 static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf);
@@ -132,6 +134,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define DEFAULT_HOST          "127.0.0.1"
 #define DEFAULT_PORT          5000
 #define MAX_BUFFER_LIST_SIZE  32
+#define SEND_CLOCK_TIME_NS    2000000
 
 enum
 {
@@ -187,6 +190,7 @@ gst_quiclysrc_class_init (GstQuiclysrcClass * klass)
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GstBaseSrcClass *base_src_class = GST_BASE_SRC_CLASS (klass);
   GstPushSrcClass *push_src_class = (GstPushSrcClass *) klass;
+  GstElementClass *gstelement_class = (GstElementClass *) klass;
 
   /* Setting up pads and setting metadata should be moved to
      base_class_init if you intend to subclass this class. */
@@ -213,7 +217,8 @@ gst_quiclysrc_class_init (GstQuiclysrcClass * klass)
   /* buffer list */
   push_src_class->create = GST_DEBUG_FUNCPTR (gst_quiclysrc_create);
   base_src_class->negotiate = GST_DEBUG_FUNCPTR (gst_quiclysrc_negotiate);
-  
+
+  gstelement_class->set_clock = GST_DEBUG_FUNCPTR(gst_quiclysrc_set_clock);
 
   g_object_class_install_property(gobject_class, PROP_HOST,
                                   g_param_spec_string("host", 
@@ -269,6 +274,7 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
   quiclysrc->bind_addr = g_strdup (DEFAULT_BIND_ADDRESS);
   quiclysrc->bind_port = DEFAULT_BIND_PORT;
   quiclysrc->transport_close = FALSE;
+  quiclysrc->clockId = NULL;
 
   gst_base_src_set_live(GST_BASE_SRC(quiclysrc), TRUE);
   gst_base_src_set_format (GST_BASE_SRC (quiclysrc), GST_FORMAT_TIME);
@@ -429,6 +435,8 @@ gst_quiclysrc_finalize (GObject * object)
   quiclysrc->recv_buf = NULL;
 
   gst_quiclysrc_free_buffer_list_mem(quiclysrc);
+
+  gst_clock_id_unref(quiclysrc->clockId);
 
   G_OBJECT_CLASS (gst_quiclysrc_parent_class)->finalize (object);
 }
@@ -605,8 +613,9 @@ static int receive_packet(GstQuiclysrc *quiclysrc, GError *err)
                                 rret - off);
     if (plen == SIZE_MAX)
       break;
+    GST_OBJECT_LOCK(quiclysrc);
     quicly_receive(quiclysrc->conn, NULL, &native_sa, &packet);
-  
+    GST_OBJECT_UNLOCK(quiclysrc);
     off += plen;
   }
   g_object_unref(in_addr);
@@ -656,7 +665,9 @@ static int send_pending(GstQuiclysrc *quiclysrc) {
 static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc)
 {
   quicly_stats_t stats;
+  GST_OBJECT_LOCK(quiclysrc);
   quicly_get_stats(quiclysrc->conn, &stats);
+  GST_OBJECT_UNLOCK(quiclysrc);
   GstStructure *s;
 
   s = gst_structure_new("quiclysrc-stats",
@@ -931,12 +942,14 @@ static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
   } while ((!quiclysrc->transport_close) && (quiclysrc->pushed < quiclysrc->mem_list_size));
 
   /* Check if there is something to send */
+  /*
   if (quicly_get_first_timeout(quiclysrc->conn) <= 
                   quiclysrc->ctx.now->cb(quiclysrc->ctx.now)) {
     if (send_pending(quiclysrc) != 0) {
         g_printerr("Failed to send in create\n");
     }
   }
+  */
 
   GstBufferList *buf_list;
   GstBuffer *out_buf = NULL;
@@ -1254,6 +1267,42 @@ static gboolean gst_quiclysrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * q
   gst_object_unref(pool);
 
   return TRUE;
+}
+
+gboolean send_async_ack_cb(GstClock *clock, GstClockTime t, GstClockID id, gpointer data)
+{
+  GstQuiclysrc *quiclysrc = GST_QUICLYSRC(data);
+
+    /* Check if there is something to send */
+  if (quicly_get_first_timeout(quiclysrc->conn) <= 
+                  quiclysrc->ctx.now->cb(quiclysrc->ctx.now)) {
+    GST_OBJECT_LOCK(quiclysrc);
+    if (send_pending(quiclysrc) != 0) {
+        g_printerr("Failed to send in create\n");
+    }
+    GST_OBJECT_UNLOCK(quiclysrc);
+  }
+
+  return TRUE;
+}
+
+/* Obtain the pipeline clock and schedule a callback for receving quic packets */
+static gboolean gst_quiclysrc_set_clock(GstElement *ele, GstClock *clock)
+{
+  GstQuiclysrc *quiclysrc = GST_QUICLYSRC(ele);
+  
+  if (GST_IS_CLOCK(clock)) {
+    if ((quiclysrc->clockId = gst_clock_new_periodic_id(clock, 
+                                      gst_clock_get_internal_time(clock), 
+                                      SEND_CLOCK_TIME_NS)) == NULL)
+      g_printerr("Could not create periodic clock\n");
+
+    if(gst_clock_id_wait_async(quiclysrc->clockId, send_async_ack_cb, quiclysrc, NULL) != GST_CLOCK_OK) {
+      g_printerr("Failed to schedule async receive callback\n");
+    } 
+  } 
+
+  return GST_ELEMENT_CLASS(gst_quiclysrc_parent_class)->set_clock(ele, clock);
 }
 
 static gboolean

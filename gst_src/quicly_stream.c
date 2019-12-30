@@ -12,7 +12,8 @@
 #include <gst/rtp/gstrtpbuffer.h>
 #include <gst/rtp/gstrtcpbuffer.h>
 
-#define STAT_TIME_NS 1000000000 /* get stats every second */
+//#define STAT_TIME_NS 1000000000 /* get stats every second */
+#define STAT_TIME_NS 500000000 /* get stats every half second */
 
 int rtp_packet_num = 0;
 gssize rtp_bytes = 0;
@@ -43,6 +44,18 @@ typedef struct {
     GstClockID clockId;
 } Gst_elements;
 
+typedef struct {
+    uint64_t packets_sent;
+    uint64_t packets_lost;
+    uint64_t packets_received;
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    uint64_t bytes_lost;
+    uint64_t jitbuf_pushed;
+    uint64_t jitbuf_lost;
+    uint64_t jitbuf_late;
+} Stats;
+
 typedef struct _AppData
 {
     gchar *file_path;
@@ -61,7 +74,9 @@ typedef struct _AppData
     gboolean aux;
     gboolean scream;
     gboolean camera;
+    gboolean verbose;
     Gst_elements elements;
+    Stats stats;
 } AppData;
 
 typedef struct _SessionData
@@ -126,7 +141,7 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
             gst_structure_free(stats);
 
-            fprintf(data->stat_file_path, "%lu, %lu\n", packets_sent, bytes_sent);
+            fprintf(data->stat_file_path, "%lu,%lu\n", packets_sent, bytes_sent);
         } else {
             guint64 packets_sent, packets_received, packets_lost, 
                     bytes_received, bytes_sent, bytes_in_flight;
@@ -143,7 +158,7 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             gst_structure_get_uint(stats, "cwnd", &cwnd);
             gst_structure_free(stats);
 
-            fprintf(data->stat_file_path, "%lu, %lu, %lu, %lu, %lu, %lu, %u, %u\n", 
+            fprintf(data->stat_file_path, "%lu,%lu,%lu,%lu,%lu,%lu,%u,%u\n", 
                     packets_sent, packets_lost, packets_received, bytes_sent, bytes_received, bytes_in_flight, srtt, cwnd);
         }
     } else {
@@ -188,7 +203,7 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
         #pragma GCC diagnostic pop
 
         if (data->udp) {
-            fprintf(data->stat_file_path, "%lu, %lu, %lu, %lu, %u, %lu\n", pushed, rtp_lost, late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
+            fprintf(data->stat_file_path, "%lu,%lu,%lu,%lu,%u,%lu\n", pushed, rtp_lost, late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
         } else {
             /* quicly */
             g_object_get(data->elements.net, "stats", &stats, NULL);
@@ -199,8 +214,19 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
             gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
             gst_structure_free(stats);
-            fprintf(data->stat_file_path, "%lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu, %u, %lu\n", 
-                    packets_sent, packets_lost, packets_received, bytes_sent, bytes_received, pushed, rtp_lost, late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
+            fprintf(data->stat_file_path, "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu\n", 
+                    packets_sent-data->stats.packets_sent, packets_lost-data->stats.packets_lost, 
+                    packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent, bytes_received-data->stats.bytes_received, 
+                    pushed-data->stats.jitbuf_pushed, rtp_lost-data->stats.jitbuf_lost, 
+                    late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
+            data->stats.packets_sent = packets_sent;
+            data->stats.packets_lost = packets_lost;
+            data->stats.packets_received = packets_received;
+            data->stats.bytes_sent = bytes_sent;
+            data->stats.bytes_received = bytes_received;
+            data->stats.jitbuf_pushed = pushed;
+            data->stats.jitbuf_lost = rtp_lost;
+            data->stats.jitbuf_late = late;
         }
     }
 
@@ -1280,10 +1306,12 @@ int main (int argc, char *argv[])
     data.key_file = NULL;;
     data.elements.jitterbuf = NULL;
     data.stat_file_path = NULL;
+    data.verbose = FALSE;
     gchar *logfile = NULL;
     GOptionContext *ctx;
     GError *err = NULL;
     gchar *plugins = NULL;
+    memset(&data.stats, 0, sizeof(Stats));
     
     GOptionEntry entries[] = {
         {"scream", 's', 0, G_OPTION_ARG_NONE, &data.scream,
@@ -1318,6 +1346,8 @@ int main (int argc, char *argv[])
          "Client. Use fakesink", NULL},
         {"logfile", 'l', 0, G_OPTION_ARG_STRING, &logfile,
          "Log stats. Filepath or stdout", NULL}, 
+        {"verbose", 'v', 0, G_OPTION_ARG_NONE, &data.verbose,
+         "Print additional information", NULL}, 
         {NULL}
     };
 
@@ -1349,26 +1379,28 @@ int main (int argc, char *argv[])
         if (strcmp(logfile, "stdout") == 0) {
             data.stat_file_path = stdout;
         } else {
-            data.stat_file_path = fopen(logfile, "a");
+            // TODO: change to append
+            data.stat_file_path = fopen(logfile, "w");
             if (data.stat_file_path == NULL) {
                 g_printerr("Could not open file. Err: %s\n", strerror(errno));
                 return -1;
             }
             /* Print application info */
-            fprintf(data.stat_file_path, "#%s, Transport: %s, CC: %s\n", data.file_path ? "Server" : "Client", data.udp ? "UDP" : "QUIC", data.scream ? "Scream" : "None");
+            // TODO: Add additional info, like quic with streams, rtp packet size, mtu, quic max segment size, etc.
+            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s\n", data.file_path ? "server" : "client", data.udp ? "udp" : "quic", data.scream ? "scream" : "none");
             if (data.file_path) {
                 /* Print value explanation for server */
                 if (data.udp)
-                    fprintf(data.stat_file_path, "#packets-sent, bytes-sent\n");
+                    fprintf(data.stat_file_path, "#args:packets-sent, bytes-sent\n");
                 else
-                    fprintf(data.stat_file_path, "#packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, bytes-in-flight, srtt, cwnd\n");
+                    fprintf(data.stat_file_path, "#args:packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, bytes-in-flight, srtt, cwnd\n");
             } else {
                 /* Print value explanation for client */
                 if (data.udp)
-                    fprintf(data.stat_file_path, "#jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                    fprintf(data.stat_file_path, "#args:jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
                 else
-                    fprintf(data.stat_file_path, "#packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, \
-                                                  jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                    fprintf(data.stat_file_path, "#args:packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, "
+                                                 "jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
             }
         }
         g_free(logfile);

@@ -49,6 +49,7 @@ struct _GstQuiclysrc
   GSocketAddress *dst_addr;
   GstCaps *caps;
   GSocket *socket;
+  GstClockID clockId;
 
   guint udp_mtu;
   guint quicly_mtu;
