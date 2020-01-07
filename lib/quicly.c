@@ -3009,7 +3009,7 @@ static int do_detect_loss(quicly_loss_t *ld, uint64_t largest_acked, uint32_t de
              sent->packet_number <= largest_acked - QUICLY_LOSS_DEFAULT_PACKET_THRESHOLD))) { /* packet threshold */
         if (sent->bytes_in_flight != 0 && conn->egress.max_lost_pn <= sent->packet_number) {
             if (sent->packet_number != largest_newly_lost_pn) {
-                printf("time_diff: %lu, max_delay: %lu, pn: %lu, packetThreshold: %lu\n", now - sent->sent_at, delay_until_lost, sent->packet_number , largest_acked - QUICLY_LOSS_DEFAULT_PACKET_THRESHOLD);
+                //printf("time_diff: %lu, max_delay: %lu, pn: %lu, packetThreshold: %lu\n", now - sent->sent_at, delay_until_lost, sent->packet_number , largest_acked - QUICLY_LOSS_DEFAULT_PACKET_THRESHOLD);
                 ++conn->super.stats.num_packets.lost;
                 largest_newly_lost_pn = sent->packet_number;
                 quicly_cc_on_lost(&conn->egress.cc, sent->bytes_in_flight, sent->packet_number, conn->egress.packet_number);
@@ -3914,6 +3914,7 @@ static int handle_ack_frame(quicly_conn_t *conn, struct st_quicly_handle_payload
                     if (packet_number == frame.largest_acknowledged) {
                         conn->super.stats.timestamp.latest_ack_send_time = sent->sent_at;
                         conn->super.stats.timestamp.latest_ack_recv_time = frame.receive_time;
+                        conn->super.stats.timestamp.now = now;
                     }
                     ++conn->super.stats.num_packets.acked;
                     conn->super.stats.num_bytes.acked += sent->bytes_in_flight;

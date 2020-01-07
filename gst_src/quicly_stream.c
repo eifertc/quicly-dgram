@@ -12,8 +12,8 @@
 #include <gst/rtp/gstrtpbuffer.h>
 #include <gst/rtp/gstrtcpbuffer.h>
 
-//#define STAT_TIME_NS 1000000000 /* get stats every second */
-#define STAT_TIME_NS 500000000 /* get stats every half second */
+#define STAT_TIME_NS 1000000000 /* get stats every second */
+//#define STAT_TIME_NS 500000000 /* get stats every half second */
 
 int rtp_packet_num = 0;
 gssize rtp_bytes = 0;
@@ -40,8 +40,10 @@ typedef struct {
     GstElement *net;
     GstElement *session;
     GstElement *jitterbuf;
+    GstElement *scream;
     GObject *internal_session;
     GstClockID clockId;
+    GstPipeline *pipeline;
 } Gst_elements;
 
 typedef struct {
@@ -77,6 +79,7 @@ typedef struct _AppData
     gboolean verbose;
     Gst_elements elements;
     Stats stats;
+    GstClockTime refTime;
 } AppData;
 
 typedef struct _SessionData
@@ -129,10 +132,10 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
 {
     AppData *data = (AppData *) user_data;
     GstStructure *stats;
+    float time = (gst_clock_get_time(gst_system_clock_obtain()) - data->refTime) / 1.0e9f;
 
     if (data->file_path) {
         /* Server stats */
-
         if (data->udp) {
             guint64 bytes_sent, packets_sent;
             g_signal_emit_by_name(data->elements.net, "get-stats", 
@@ -141,7 +144,7 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
             gst_structure_free(stats);
 
-            fprintf(data->stat_file_path, "%lu,%lu\n", packets_sent, bytes_sent);
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu", time, packets_sent-data->stats.packets_sent, bytes_sent-data->stats.packets_sent);
         } else {
             guint64 packets_sent, packets_received, packets_lost, 
                     bytes_received, bytes_sent, bytes_in_flight;
@@ -157,10 +160,24 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             gst_structure_get_uint(stats, "rtt-smoothed", &srtt);
             gst_structure_get_uint(stats, "cwnd", &cwnd);
             gst_structure_free(stats);
-
-            fprintf(data->stat_file_path, "%lu,%lu,%lu,%lu,%lu,%lu,%u,%u\n", 
-                    packets_sent, packets_lost, packets_received, bytes_sent, bytes_received, bytes_in_flight, srtt, cwnd);
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u", time,
+                    packets_sent-data->stats.packets_sent, packets_lost-data->stats.packets_lost, 
+                    packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent, bytes_received-data->stats.bytes_received, 
+                    bytes_in_flight, srtt, cwnd);
+            
+            data->stats.packets_lost = packets_lost;
+            data->stats.packets_received = packets_received;
+            data->stats.bytes_received = bytes_received;
         }
+        data->stats.bytes_sent = bytes_sent;
+        data->stats.packets_sent = packets_sent;
+        if (data->scream) {
+            gchar *s;
+            g_object_get(data->elements.scream, "stats", &s, NULL);
+            fprintf(data->stat_file_path, ",%s\n", s);
+        } else {
+            fprintf(data->stat_file_path, "\n");
+        } 
     } else {
         /* Client stats */
         if (!data->elements.jitterbuf) {
@@ -203,7 +220,8 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
         #pragma GCC diagnostic pop
 
         if (data->udp) {
-            fprintf(data->stat_file_path, "%lu,%lu,%lu,%lu,%u,%lu\n", pushed, rtp_lost, late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%u,%lu\n", time, pushed-data->stats.jitbuf_pushed, 
+                    rtp_lost-data->stats.jitbuf_lost, late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
         } else {
             /* quicly */
             g_object_get(data->elements.net, "stats", &stats, NULL);
@@ -214,7 +232,7 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
             gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
             gst_structure_free(stats);
-            fprintf(data->stat_file_path, "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu\n", 
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu\n", time,
                     packets_sent-data->stats.packets_sent, packets_lost-data->stats.packets_lost, 
                     packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent, bytes_received-data->stats.bytes_received, 
                     pushed-data->stats.jitbuf_pushed, rtp_lost-data->stats.jitbuf_lost, 
@@ -224,10 +242,10 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             data->stats.packets_received = packets_received;
             data->stats.bytes_sent = bytes_sent;
             data->stats.bytes_received = bytes_received;
-            data->stats.jitbuf_pushed = pushed;
-            data->stats.jitbuf_lost = rtp_lost;
-            data->stats.jitbuf_late = late;
         }
+        data->stats.jitbuf_pushed = pushed;
+        data->stats.jitbuf_lost = rtp_lost;
+        data->stats.jitbuf_late = late;
     }
 
     return TRUE;
@@ -565,11 +583,10 @@ cb_request_pt_map (GstElement * rtpbin, guint session, guint pt,
 {
   SessionData *data = (SessionData *) user_data;
   gchar *caps_str;
-  g_print ("Looking for caps for pt %u in session %u, have %u\n", pt, session,
-      data->sessionNum);
+  //g_print ("Looking for caps for pt %u in session %u, have %u\n", pt, session, data->sessionNum);
   if (session == data->sessionNum) {
     caps_str = gst_caps_to_string (data->caps);
-    g_print ("Returning %s\n", caps_str);
+    //g_print ("Returning %s\n", caps_str);
     g_free (caps_str);
     return gst_caps_ref (data->caps);
   }
@@ -586,7 +603,7 @@ cb_handle_new_stream(GstElement *ele, GstPad *pad, gpointer data)
     padName = gst_pad_get_name (pad);
     myPrefix = g_strdup_printf ("recv_rtp_src_%u", session->sessionNum);
 
-    g_print ("New pad: %s, looking for %s_*\n", padName, myPrefix);
+    //g_print ("New pad: %s, looking for %s_*\n", padName, myPrefix);
 
     if (g_str_has_prefix (padName, myPrefix)) {
     GstPad *outputSinkPad;
@@ -601,7 +618,7 @@ cb_handle_new_stream(GstElement *ele, GstPad *pad, gpointer data)
     g_assert_cmpint (gst_pad_link (pad, outputSinkPad), ==, GST_PAD_LINK_OK);
     gst_object_unref (outputSinkPad);
 
-    g_print ("Linked!\n");
+    //g_print ("Linked!\n");
     }
     g_free (myPrefix);
     g_free (padName);
@@ -839,6 +856,7 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
             GstElement *scream = gst_element_factory_make("gscreamtx", "scream");
             //GstElement *cam = gst_element_factory_make("v412src", "camsrc");
             g_object_set(scream, "media-src", 0, NULL);
+            sdata->elements.scream = scream;
 
             if (!sdata->udp)
                 g_object_set(scream, "quic", TRUE, NULL);
@@ -890,9 +908,58 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
     return session;
 }
 
+/* Print verbose server stats */
+void print_server_stats(AppData *sdata)
+{
+    GstStructure *stats;
+    gchar *str;
+    g_object_get(gst_bin_get_by_name(GST_BIN(sdata->elements.pipeline), "rtppay"), "stats", &stats, NULL);
+    str = gst_structure_to_string(stats);
+    g_print("##### RTP Payloader stats:\n%s\n", str);
+    gst_structure_free(stats);
+    g_free(str);
+
+    g_object_get(sdata->elements.session, "stats", &stats, NULL);
+    str = gst_structure_to_string(stats);
+    g_print("##### RTPSession stats:\n%s\n", str);
+    gst_structure_free(stats);
+    g_free(str);
+
+    if (sdata->udp) {
+        g_signal_emit_by_name(gst_bin_get_by_name(GST_BIN(sdata->elements.pipeline), "rtpsink"),
+                              "get-stats", sdata->host, sdata->port, &stats);
+        str = gst_structure_to_string(stats);
+        g_print("##### UdpSink stats:\n%s\n", str);
+        gst_structure_free(stats);
+        g_free(str);
+    } else {
+        g_object_get(gst_bin_get_by_name(GST_BIN(sdata->elements.pipeline), "rtpsink"), "stats", &stats, NULL);
+        str = gst_structure_to_string(stats);
+        g_print("##### QuiclySink stats:\n%s\n", str);
+        gst_structure_free(stats);
+        g_free(str);
+    }
+
+    gint64 rate;
+    GstElement *qu;
+    if ((qu = gst_bin_get_by_name(GST_BIN(sdata->elements.pipeline), "queue2_1")) != NULL) {
+        g_object_get(qu, "avg-in-rate", &rate, NULL);
+        g_print("##### Rate queue2_1 (Mbit/s): %lu\n", rate / 125000);
+        gst_object_unref(qu);
+    }
+    if ((qu = gst_bin_get_by_name(GST_BIN(sdata->elements.pipeline), "queue2_2")) != NULL) {
+        g_object_get(qu, "avg-in-rate", &rate, NULL);
+        g_print("##### Rate queue2_2 (Mbit/s): %lu\n", rate / 125000);
+        gst_object_unref(qu);
+    }
+
+    if (sdata->debug)
+        g_print("Num buffers at sink: %i. Num bytes: %u\n", num_buffers, num_bytes);
+}
+
 int run_server(AppData *sdata)
 {
-    g_print("Starting as server...\n");
+    g_print("Starting as server.\n");
 
     if (sdata->file_path == NULL) {
         g_printerr("Missing source video file path\n");
@@ -949,6 +1016,7 @@ int run_server(AppData *sdata)
     g_signal_emit_by_name(rtpBin, "get-internal-session", 0, &int_session);
     sdata->elements.session = session;
     sdata->elements.internal_session = int_session;
+    sdata->elements.pipeline = pipe;
 
 
     if (sdata->rtcp && sdata->debug) {
@@ -957,72 +1025,27 @@ int run_server(AppData *sdata)
     }
 
     /* start the pipeline */
-    g_print("Stream started...\n");
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_PLAYING);
 
     /* Gather statistics periodically */
+    sdata->refTime = gst_clock_get_time(gst_system_clock_obtain());
     if (sdata->stat_file_path) 
         create_stat_collection_callback(pipe, sdata);
 
     g_main_loop_run(loop);
 
     /* Out of the main loop */
-    g_print ("Pipeline stopping.\n");
     if (sdata->stat_file_path)
         gst_clock_id_unref(sdata->elements.clockId);
 
-    /* Print payloader stats */
-    GstStructure *stats;
-    gchar *str;
-    g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "rtppay"), "stats", &stats, NULL);
-    str = gst_structure_to_string(stats);
-    g_print("##### RTP Payloader stats:\n%s\n", str);
-    gst_structure_free(stats);
-    g_free(str);
-
-    g_object_get(session, "stats", &stats, NULL);
-    str = gst_structure_to_string(stats);
-    g_print("##### RTPSession stats:\n%s\n", str);
-    gst_structure_free(stats);
-    g_free(str);
-
-    if (sdata->udp) {
-        g_signal_emit_by_name(gst_bin_get_by_name(GST_BIN(pipe), "rtpsink"),
-                              "get-stats", sdata->host, sdata->port, &stats);
-        str = gst_structure_to_string(stats);
-        g_print("##### UdpSink stats:\n%s\n", str);
-        gst_structure_free(stats);
-        g_free(str);
-    } else {
-        g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "rtpsink"), "stats", &stats, NULL);
-        str = gst_structure_to_string(stats);
-        g_print("##### QuiclySink stats:\n%s\n", str);
-        gst_structure_free(stats);
-        g_free(str);
-    }
-
-    gint64 rate;
-    GstElement *qu;
-    if ((qu = gst_bin_get_by_name(GST_BIN(pipe), "queue2_1")) != NULL) {
-        g_object_get(qu, "avg-in-rate", &rate, NULL);
-        g_print("##### Rate queue2_1 (Mbit/s): %lu\n", rate / 125000);
-        gst_object_unref(qu);
-    }
-    if ((qu = gst_bin_get_by_name(GST_BIN(pipe), "queue2_2")) != NULL) {
-        g_object_get(qu, "avg-in-rate", &rate, NULL);
-        g_print("##### Rate queue2_2 (Mbit/s): %lu\n", rate / 125000);
-        gst_object_unref(qu);
-    }
-
-    if (sdata->debug)
-        g_print("Num buffers at sink: %i. Num bytes: %u\n", num_buffers, num_bytes);
+    if (sdata->verbose)
+        print_server_stats(sdata);
 
     gst_element_set_state (GST_ELEMENT(pipe), GST_STATE_NULL);
 
     g_print ("Deleting pipeline\n");
     gst_object_unref(pipe);
     g_main_loop_unref(loop);
-
     return 0;
 }
 
@@ -1152,9 +1175,75 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
     return ret;
 }
 
+/* Print verbose stats */
+void print_client_stats(AppData *cdata)
+{
+    GstStructure *stats;
+    gchar *str;
+    if (cdata->elements.jitterbuf) {
+        g_object_get(cdata->elements.jitterbuf, "stats", &stats, NULL);
+        str = gst_structure_to_string(stats);
+        g_print("##### Jitterbuffer stats:\n%s\n", str);
+        gst_structure_free(stats);
+        g_free(str);
+
+        //g_object_get(session, "stats", &stats, NULL);
+        //str = gst_structure_to_string(stats);
+        //g_print("##### RTPSession stats:\n%s\n", str);
+        //gst_structure_free(stats);
+        //g_free(str);
+
+        GValueArray *arr = NULL;
+        g_object_get(cdata->elements.internal_session, "sources", &arr, NULL);
+
+        gboolean internal;
+        if (arr) {
+            for (int i = 0; i < arr->n_values; i++) {
+                GObject *rtpsrc;
+                rtpsrc = g_value_get_object(arr->values + i);
+                g_object_get(rtpsrc, "stats", &stats, NULL);
+                g_print("RTPSRC NUMBER: %i\n", i);
+                gst_structure_get_boolean(stats, "internal", &internal);
+                if (!internal) {
+                    guint jitter;
+                    guint64 bitrate;
+                    gst_structure_get_uint(stats, "jitter", &jitter);
+                    gst_structure_get_uint64(stats, "bitrate", &bitrate);
+
+                    g_print("##### RTPSrc Nr.%i stats:\n", i);
+                    g_print("Bitrate: %luKbit/s. Jitter: %ums\n", bitrate/1000, jitter);
+
+                    gst_structure_free(stats);
+                }
+            }
+        }
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        g_value_array_free(arr);
+        #pragma GCC diagnostic pop
+    }
+
+    if(!cdata->udp) {
+        g_object_get(gst_bin_get_by_name(GST_BIN(cdata->elements.pipeline), "rtpsrc"), "stats", &stats, NULL);
+        str = gst_structure_to_string(stats);
+        g_print("##### QuiclySrc stats:\n%s\n", str);
+        gst_structure_free(stats);
+        g_free(str);
+    }
+
+    if (cdata->debug) {
+        g_print("Num rtp buffers: %i. Num bytes: %u\n", num_buffers, num_bytes);
+        /*
+        g_print("Quiclysrc src pad. Packets pushed: %i. Packets lost: %i. Bytes: %lu\n", rtp_packet_num, packets_lost, rtp_bytes);
+        g_print("\nAvg time between pushed buffers (in micro seconds): %lu. Highest: %lu\n", 
+                avg_time / num_buffers_rtp, highest_jit);
+        */
+    }
+}
+
 int run_client(AppData *cdata)
 {
-    g_print("Starting as client...\n");
+    g_print("Starting as client.\n");
 
     GstPipeline *pipe;
     SessionData *videoSession;
@@ -1196,85 +1285,24 @@ int run_client(AppData *cdata)
     g_signal_emit_by_name(rtpBin, "get-internal-session", 0, &int_session);
     cdata->elements.session = session;
     cdata->elements.internal_session = int_session;
+    cdata->elements.pipeline = pipe;
 
     /* start the pipeline */
-    //g_print("APPLICATION THREAD ID: %ld\n", pthread_self());
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_PLAYING);
 
-    /* Setup callback for continous stat receive */
-    if (cdata->stat_file_path) {
+    /* Setup callback for periodic stat receive */
+    cdata->refTime = gst_clock_get_time(gst_system_clock_obtain());
+    if (cdata->stat_file_path)
         create_stat_collection_callback(pipe, cdata);
-    }
 
     g_main_loop_run(loop);
 
-    /* Out of the main loop, clean up nicely */
-    g_print ("Pipeline stopping.\n");
+    /* Out of the main loop */
     if (cdata->stat_file_path)
         gst_clock_id_unref(cdata->elements.clockId);
     
-    //stats
-    GstStructure *stats;
-    gchar *str;
-    if (cdata->elements.jitterbuf) {
-        g_object_get(cdata->elements.jitterbuf, "stats", &stats, NULL);
-        str = gst_structure_to_string(stats);
-        g_print("##### Jitterbuffer stats:\n%s\n", str);
-        gst_structure_free(stats);
-        g_free(str);
-
-        //g_object_get(session, "stats", &stats, NULL);
-        //str = gst_structure_to_string(stats);
-        //g_print("##### RTPSession stats:\n%s\n", str);
-        //gst_structure_free(stats);
-        //g_free(str);
-
-        GValueArray *arr = NULL;
-        g_object_get(int_session, "sources", &arr, NULL);
-
-        gboolean internal;
-        if (arr) {
-            for (int i = 0; i < arr->n_values; i++) {
-                GObject *rtpsrc;
-                rtpsrc = g_value_get_object(arr->values + i);
-                g_object_get(rtpsrc, "stats", &stats, NULL);
-                g_print("RTPSRC NUMBER: %i\n", i);
-                gst_structure_get_boolean(stats, "internal", &internal);
-                if (!internal) {
-                    guint jitter;
-                    guint64 bitrate;
-                    gst_structure_get_uint(stats, "jitter", &jitter);
-                    gst_structure_get_uint64(stats, "bitrate", &bitrate);
-
-                    g_print("##### RTPSrc Nr.%i stats:\n", i);
-                    g_print("Bitrate: %luKbit/s. Jitter: %ums\n", bitrate/1000, jitter);
-
-                    gst_structure_free(stats);
-                }
-            }
-        }
-        #pragma GCC diagnostic push
-        #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-        g_value_array_free(arr);
-        #pragma GCC diagnostic pop
-    }
-
-    if(!cdata->udp) {
-        g_object_get(gst_bin_get_by_name(GST_BIN(pipe), "rtpsrc"), "stats", &stats, NULL);
-        str = gst_structure_to_string(stats);
-        g_print("##### QuiclySrc stats:\n%s\n", str);
-        gst_structure_free(stats);
-        g_free(str);
-    }
-
-    if (cdata->debug) {
-        g_print("Num rtp buffers: %i. Num bytes: %u\n", num_buffers, num_bytes);
-        /*
-        g_print("Quiclysrc src pad. Packets pushed: %i. Packets lost: %i. Bytes: %lu\n", rtp_packet_num, packets_lost, rtp_bytes);
-        g_print("\nAvg time between pushed buffers (in micro seconds): %lu. Highest: %lu\n", 
-                avg_time / num_buffers_rtp, highest_jit);
-        */
-    }
+    if (cdata->verbose)
+        print_client_stats(cdata);
 
     gst_element_set_state(GST_ELEMENT(pipe), GST_STATE_NULL);
 
@@ -1390,16 +1418,28 @@ int main (int argc, char *argv[])
             fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s\n", data.file_path ? "server" : "client", data.udp ? "udp" : "quic", data.scream ? "scream" : "none");
             if (data.file_path) {
                 /* Print value explanation for server */
+                char *s = (char *) malloc(300);
+                char *s2 = (char *) malloc(200);
                 if (data.udp)
-                    fprintf(data.stat_file_path, "#args:packets-sent, bytes-sent\n");
+                    sprintf(s, "#args:time, u-packets-sent, u-bytes-sent");
                 else
-                    fprintf(data.stat_file_path, "#args:packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, bytes-in-flight, srtt, cwnd\n");
+                    sprintf(s, "#args:time, q-packets-sent, q-packets-lost, q-packets-received, q-bytes-sent, q-bytes-received, q-bytes-in-flight, q-srtt, q-cwnd");
+
+                if (data.scream)
+                    sprintf(s2, ", sc-queue-delay, sc-owd, sc-srtt, sc-cwnd, sc-bytes-in-flight, sc-rate-transmitted, sc-target-bitrate, sc-rtp-rate, sc-rate-lost\n");
+                else
+                    sprintf(s2, "\n");
+
+                strcat(s, s2);
+                fprintf(data.stat_file_path, "%s", s);
+                free(s);
+                free(s2);
             } else {
                 /* Print value explanation for client */
                 if (data.udp)
-                    fprintf(data.stat_file_path, "#args:jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                    fprintf(data.stat_file_path, "#args:time, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
                 else
-                    fprintf(data.stat_file_path, "#args:packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, "
+                    fprintf(data.stat_file_path, "#args:time, packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, "
                                                  "jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
             }
         }

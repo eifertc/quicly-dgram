@@ -392,6 +392,7 @@ struct st_quicly_conn_streamgroup_state_t {
     struct {                                                                                                                       \
         uint64_t latest_ack_send_time;                                                                                             \
         uint64_t latest_ack_recv_time;                                                                                             \
+        int64_t now;                                                                                                               \
     } timestamp
 
 typedef struct st_quicly_stats_t {

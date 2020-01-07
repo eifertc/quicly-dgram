@@ -48,6 +48,7 @@ struct _GstQuiclysink
   gint bind_port;
   GstCaps *caps;
   GstClockID clockId;
+  GstClockID fbClockId;
 
   guint quicly_mtu;
 
@@ -78,6 +79,7 @@ struct _GstQuiclysink
   gssize num_bytes;
 
   gboolean stream_mode;
+  gboolean multi_stream_mode;
 
   gint64 fb_timeout; /* reference time for feedback signal emit */
   quicly_feedback_t feedback;

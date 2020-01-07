@@ -71,7 +71,7 @@ int quicly_decode_ack_frame(const uint8_t **src, const uint8_t *end, quicly_ack_
 
     if ((frame->largest_acknowledged = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;
-    if ((frame->receive_time = quicly_decodev(src, end)) == UINT64_MAX)
+    if ((frame->receive_time = quicly_decodev(src, end)) == INT64_MAX)
         goto Error;
     if ((frame->ack_delay = quicly_decodev(src, end)) == UINT64_MAX)
         goto Error;

@@ -147,6 +147,7 @@ int quicly_sentmap_update(quicly_sentmap_t *map, quicly_sentmap_iter_t *iter, qu
             notify_lost = 1;
         assert(map->bytes_in_flight >= packet.bytes_in_flight);
         map->bytes_in_flight -= packet.bytes_in_flight;
+        //printf("IN FLIGHT: %lu\n", map->bytes_in_flight);
     }
     iter->p->data.packet.bytes_in_flight = 0;
 
