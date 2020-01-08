@@ -136,8 +136,8 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
 
     if (data->file_path) {
         /* Server stats */
+        guint64 bytes_sent, packets_sent;
         if (data->udp) {
-            guint64 bytes_sent, packets_sent;
             g_signal_emit_by_name(data->elements.net, "get-stats", 
                                     data->host, data->port, &stats);
             gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
@@ -146,8 +146,8 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
 
             fprintf(data->stat_file_path, "%.3f,%lu,%lu", time, packets_sent-data->stats.packets_sent, bytes_sent-data->stats.packets_sent);
         } else {
-            guint64 packets_sent, packets_received, packets_lost, 
-                    bytes_received, bytes_sent, bytes_in_flight;
+            guint64 packets_received, packets_lost, 
+                    bytes_received, bytes_in_flight;
             guint srtt, cwnd;
             g_object_get(data->elements.net, "stats", &stats, NULL);
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);

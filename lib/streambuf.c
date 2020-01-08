@@ -314,7 +314,7 @@ int quicly_dgrambuf_write_vec(quicly_dgram_t *dgram, quicly_dgram_listbuf_t *db,
 
     if (db->vecs.size == db->vecs.capacity) {
         quicly_dgram_listbuf_vec_t *new_entries;
-        size_t new_cap = db->vecs.capacity == 0 ? 4 : db->vecs.capacity * 4;
+        size_t new_cap = db->vecs.capacity == 0 ? 4 : db->vecs.capacity * 2;
         if ((new_entries = realloc(db->vecs.entries, new_cap * sizeof(*db->vecs.entries))) == NULL)
             return PTLS_ERROR_NO_MEMORY;
         db->vecs.entries = new_entries;

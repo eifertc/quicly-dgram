@@ -137,6 +137,7 @@ static int quicly_streambuf_egress_write_rtp_framing(quicly_stream_t *stream, co
 
 
 /* dgram buff  */
+/* TODO: Refactor ingress buffer handling -> BufferLists */
 typedef struct st_quicly_dgram_listbuf_vec_t {
     size_t len;
     void *data;
