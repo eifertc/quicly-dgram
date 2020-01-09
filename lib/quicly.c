@@ -937,7 +937,7 @@ int quicly_get_stats(quicly_conn_t *conn, quicly_stats_t *stats)
     /* set or generate the non-pre-built stats fields here */
     stats->rtt = conn->egress.loss.rtt;
     stats->cc = conn->egress.cc;
-    stats->bytes_in_flight = conn->egress.sentmap.bytes_in_flight;
+    //stats->bytes_in_flight = conn->egress.sentmap.bytes_in_flight;
 
     return 0;
 }
@@ -2837,6 +2837,7 @@ int _quicly_send_dgram(quicly_conn_t *conn, quicly_send_context_t *s)
 {
     size_t size;
     uint64_t dgram_id = 0;
+
     /* send one dgram in one frame */
     size = quicly_dgram_can_send(conn->dgram);
 
@@ -2907,6 +2908,10 @@ int quicly_send_dgram(quicly_conn_t *conn, quicly_send_context_t *s)
     int ret = 0;
     while (quicly_can_send_stream_data(conn, s) && 
            quicly_dgram_can_send(conn->dgram) && ret == 0) {
+        if (now > quicly_dgram_get_expire_time(conn->dgram)) {
+            conn->dgram->callbacks->on_send_shift(conn->dgram, 1);
+            continue;
+        }
         ret = _quicly_send_dgram(conn, s);
     }
 
@@ -3599,7 +3604,6 @@ int quicly_send(quicly_conn_t *conn, quicly_datagram_t **packets, size_t *num_pa
         *num_packets = 0;
         return 0;
     }
-
     QUICLY_PROBE(SEND, conn, probe_now(), conn->super.state,
                  QUICLY_PROBE_HEXDUMP(conn->super.peer.cid.cid, conn->super.peer.cid.len));
 
@@ -3648,6 +3652,7 @@ int quicly_send(quicly_conn_t *conn, quicly_datagram_t **packets, size_t *num_pa
     assert_consistency(conn, 1);
 
     *num_packets = s.num_packets;
+    conn->super.stats.num_bytes.bytes_in_flight = conn->egress.sentmap.bytes_in_flight;
     return ret;
 }
 
@@ -3886,7 +3891,7 @@ static int handle_ack_frame(quicly_conn_t *conn, struct st_quicly_handle_payload
 
     if ((ret = quicly_decode_ack_frame(&state->src, state->end, &frame, state->frame_type == QUICLY_FRAME_TYPE_ACK_ECN)) != 0)
         return ret;
-    //printf("smallest: %lu, largest: %lu\n", frame.smallest_acknowledged, frame.largest_acknowledged);
+
     uint64_t packet_number = frame.smallest_acknowledged;
 
     switch (state->epoch) {

@@ -479,7 +479,7 @@ static void enqueue_dgram_data(quicly_conn_t *conn, quicly_dgram_t *dgram)
         for (i = 0; reqs[i].path != NULL; ++i) {
             char req[512];
             sprintf(req, "Number %i: %s\r\n", dgram_counter, reqs[i].path);
-            ret = quicly_dgrambuf_egress_write(dgram, req, strlen(req));
+            ret = quicly_dgrambuf_egress_write(dgram, req, strlen(req), 0);
             if (ret != 0)
                 printf("dgrambuf_egress_write returns: %i\n", ret);
         }

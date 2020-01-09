@@ -388,6 +388,7 @@ struct st_quicly_conn_streamgroup_state_t {
         uint64_t sent;                                                                                                             \
         uint64_t lost;                                                                                                             \
         uint64_t acked;                                                                                                            \
+        uint64_t bytes_in_flight;                                                                                                  \
     } num_bytes;                                                                                                                   \
     struct {                                                                                                                       \
         uint64_t latest_ack_send_time;                                                                                             \
@@ -411,7 +412,7 @@ typedef struct st_quicly_stats_t {
     /**
      * bytes_in_flight
      */
-    size_t bytes_in_flight;
+    //size_t bytes_in_flight;
 } quicly_stats_t;
 
 typedef struct st_quicly_feedback_t {

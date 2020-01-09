@@ -133,7 +133,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define QUICLY_DEFAULT_MTU    1280
 #define DEFAULT_HOST          "127.0.0.1"
 #define DEFAULT_PORT          5000
-#define MAX_BUFFER_LIST_SIZE  64
+#define MAX_BUFFER_LIST_SIZE  24
 #define SEND_CLOCK_TIME_NS    2000000
 
 enum
@@ -1264,13 +1264,13 @@ static gboolean gst_quiclysrc_decide_allocation (GstBaseSrc * bsrc, GstQuery * q
   pool = gst_buffer_pool_new();
   config = gst_buffer_pool_get_config(pool);
   gst_query_parse_allocation(query, &caps, NULL);
-  gst_buffer_pool_config_set_params(config, caps, quiclysrc->udp_mtu, 0, 0);
+  gst_buffer_pool_config_set_params(config, caps, quiclysrc->quicly_mtu, 0, 0);
   gst_buffer_pool_set_config(pool, config);
 
   if (update)
-    gst_query_set_nth_allocation_pool(query, 0, pool, quiclysrc->udp_mtu, 0, 0);
+    gst_query_set_nth_allocation_pool(query, 0, pool, quiclysrc->quicly_mtu, 0, 0);
   else
-    gst_query_add_allocation_pool(query, pool, quiclysrc->udp_mtu, 0, 0);
+    gst_query_add_allocation_pool(query, pool, quiclysrc->quicly_mtu, 0, 0);
 
   gst_object_unref(pool);
 

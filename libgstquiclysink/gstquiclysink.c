@@ -51,6 +51,15 @@
 GST_DEBUG_CATEGORY_STATIC (gst_quiclysink_debug_category);
 #define GST_CAT_DEFAULT gst_quiclysink_debug_category
 
+/* rtp header */
+typedef struct {
+    uint8_t ver_p_x_cc;
+    uint8_t m_pt;
+    uint16_t seq_nr;
+    uint32_t timestamp;
+    uint32_t ssrc;
+} rtp_hdr;
+
 /* prototypes */
 static void gst_quiclysink_set_property (GObject * object,
     guint property_id, const GValue * value, GParamSpec * pspec);
@@ -61,6 +70,7 @@ static void gst_quiclysink_finalize (GObject * object);
 static gboolean gst_quiclysink_sched_cbs(GstQuiclysink *quiclysink, GstClock *clock);
 gboolean receive_async_cb(GstClock *clock, GstClockTime t, GstClockID id, gpointer data);
 gboolean emit_feedback_signal_cb(GstClock *clock, GstClockTime t, GstClockID id, gpointer data);
+gboolean gst_quiclysink_set_clock(GstElement *element, GstClock *clock);
 
 static gboolean gst_quiclysink_set_caps (GstBaseSink * sink, GstCaps * caps);
 static gboolean gst_quiclysink_start (GstBaseSink * sink);
@@ -84,7 +94,7 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
 static int on_receive_reset(quicly_stream_t *stream, int err);
 static int send_pending(GstQuiclysink *quiclysink);
 static int receive_packet(GstQuiclysink *quiclysink);
-static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len);
+static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len, gint64 max_time);
 static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink);
 
 static const char *session_file = NULL;
@@ -144,6 +154,8 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define RECEIVE_CLOCK_TIME_NS     2000000
 #define FEEDBACK_TIME_INTERVAL_NS 20000000
 #define DEFAULT_APPLICATION_CC    FALSE
+#define DEFAULT_FEEDBACK          FALSE
+#define DEFAULT_DROP_LATE         FALSE
 
 /* properties */
 enum
@@ -158,7 +170,9 @@ enum
   PROP_MULTI_STREAM_MODE,
   PROP_STATS,
   PROP_AUTO_CAPS_EXCHANGE,
-  PROP_APPLICATION_CC
+  PROP_APPLICATION_CC,
+  PROP_FEEDBACK,
+  PROP_DROP_LATE
 };
 
 /* signals */
@@ -192,7 +206,7 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   //GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GObjectClass *gobject_class = (GObjectClass *)klass;
   GstBaseSinkClass *base_sink_class = GST_BASE_SINK_CLASS (klass);
-  //GstElementClass *gstelement_class = (GstElementClass *) klass;
+  GstElementClass *gstelement_class = (GstElementClass *) klass;
 
   /* Setting up pads and setting metadata should be moved to
      base_class_init if you intend to subclass this class. */
@@ -232,7 +246,7 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   base_sink_class->render = GST_DEBUG_FUNCPTR (gst_quiclysink_render);
   base_sink_class->render_list = GST_DEBUG_FUNCPTR (gst_quiclysink_render_list);
 
-  //gstelement_class->set_clock = GST_DEBUG_FUNCPTR(gst_quiclysink_set_clock);
+  gstelement_class->set_clock = GST_DEBUG_FUNCPTR(gst_quiclysink_set_clock);
 
   g_object_class_install_property(gobject_class, PROP_BIND_ADDRESS, g_param_spec_string("bind-addr", "BindAddr", "the host address to bind", UDP_DEFAULT_BIND_ADDRESS, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property(gobject_class, PROP_BIND_PORT, g_param_spec_int("bind-port", "BindPort", "the port to bind", 1, 65535, UDP_DEFAULT_BIND_PORT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
@@ -268,6 +282,12 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   g_object_class_install_property(gobject_class, PROP_APPLICATION_CC,
                                 g_param_spec_boolean("app-cc", "ApplicationCC", "Use application level congestion control",
                                 DEFAULT_APPLICATION_CC, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property(gobject_class, PROP_FEEDBACK,
+                                g_param_spec_boolean("feedback", "FeedbackData", "Send feedback signal",
+                                DEFAULT_FEEDBACK, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property(gobject_class, PROP_DROP_LATE,
+                                g_param_spec_boolean("drop-late", "DropLate", "Drop late packets. NOT USEABLE",
+                                DEFAULT_FEEDBACK, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
@@ -285,8 +305,11 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->received_caps_ack = FALSE;
   quiclysink->auto_caps_exchange = DEFAULT_AUTO_CAPS_EXCHANGE;
   quiclysink->application_cc = DEFAULT_APPLICATION_CC;
+  quiclysink->feedback_active = DEFAULT_FEEDBACK;
+  quiclysink->drop_late = DEFAULT_DROP_LATE;
   quiclysink->clockId = NULL;
   quiclysink->fbClockId = NULL;
+  quiclysink->pipeline_clock = NULL;
 
   /* Setup quicly and tls context */
   quiclysink->tlsctx.random_bytes = ptls_openssl_random_bytes;
@@ -337,6 +360,7 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
 
   quiclysink->recv_buf = malloc(sizeof(gchar) * (2048 + 1));
   quiclysink->recv_buf_size = 2048;
+  quiclysink->previousPts = 0;
 }
 
 void
@@ -381,6 +405,12 @@ gst_quiclysink_set_property (GObject * object, guint property_id,
       break;
     case PROP_APPLICATION_CC:
       quiclysink->application_cc = g_value_get_boolean(value);
+      break;
+    case PROP_FEEDBACK:
+      quiclysink->feedback_active = g_value_get_boolean(value);
+      break;
+    case PROP_DROP_LATE:
+      quiclysink->drop_late = g_value_get_boolean(value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -576,10 +606,13 @@ gst_quiclysink_start (GstBaseSink * sink)
 static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink)
 {
   GstStructure *s;
-  GST_OBJECT_LOCK(quiclysink);
+  
   /* Stats could be 20ms out of date...*/
-  if (!quiclysink->application_cc)
+  if (!quiclysink->feedback_active) {
+    GST_OBJECT_LOCK(quiclysink);
     quicly_get_stats(quiclysink->conn, &quiclysink->stats);
+    GST_OBJECT_UNLOCK(quiclysink);
+  }
   s = gst_structure_new("quiclysink-stats",
       "packets-received", G_TYPE_UINT64, quiclysink->stats.num_packets.received,
       "packets-sent", G_TYPE_UINT64, quiclysink->stats.num_packets.sent,
@@ -591,9 +624,8 @@ static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink)
       "rtt-latest", G_TYPE_UINT, quiclysink->stats.rtt.latest,
       "rtt-minimum", G_TYPE_UINT, quiclysink->stats.rtt.minimum,
       "rtt-variance", G_TYPE_UINT, quiclysink->stats.rtt.variance,
-      "bytes-in-flight", G_TYPE_UINT64, quiclysink->stats.bytes_in_flight,
+      "bytes-in-flight", G_TYPE_UINT64, quiclysink->stats.num_bytes.bytes_in_flight,
       "cwnd", G_TYPE_UINT, quiclysink->stats.cc.cwnd, NULL);
-  GST_OBJECT_UNLOCK(quiclysink);
   return s;
 }
 
@@ -604,6 +636,10 @@ gst_quiclysink_stop (GstBaseSink * sink)
 
   GST_DEBUG_OBJECT(quiclysink, 
           "Stop. Num Packets sent: %lu. Kilobytes sent: %lu. Packets left in buffer: %lu\n", 
+          quiclysink->num_packets, quiclysink->num_bytes / 1000,
+          quicly_dgram_debug(quiclysink->dgram));
+
+  g_print("Stop. Num Packets sent: %lu. Kilobytes sent: %lu. Packets left in buffer: %lu\n", 
           quiclysink->num_packets, quiclysink->num_bytes / 1000,
           quicly_dgram_debug(quiclysink->dgram));
 
@@ -626,14 +662,6 @@ gst_quiclysink_stop (GstBaseSink * sink)
   return TRUE;
 }
 
-typedef struct {
-    uint8_t ver_p_x_cc;
-    uint8_t m_pt;
-    uint16_t seq_nr;
-    uint32_t timestamp;
-    uint32_t ssrc;
-} rtp_hdr_;
-
 /* 
  * Emit feedback signal to application
  */
@@ -650,7 +678,7 @@ gboolean emit_feedback_signal_cb(GstClock *clock, GstClockTime t, GstClockID id,
     quiclysink->stats.num_packets.sent, quiclysink->stats.num_packets.lost, quiclysink->stats.num_packets.acked, 
     quiclysink->stats.num_bytes.sent, quiclysink->stats.num_bytes.lost, quiclysink->stats.num_bytes.acked, 
     quiclysink->stats.timestamp.latest_ack_send_time, quiclysink->stats.timestamp.latest_ack_recv_time, 
-    quiclysink->stats.bytes_in_flight, quiclysink->stats.cc.cwnd, quiclysink->stats.timestamp.now);
+    quiclysink->stats.num_bytes.bytes_in_flight, quiclysink->stats.cc.cwnd, quiclysink->stats.timestamp.now);
 
   return TRUE;
 }
@@ -668,17 +696,55 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
   GstMapInfo map;
   int ret;
 
+  /*
+  if (buffer->pts != GST_CLOCK_TIME_NONE) {
+    g_print("PTS: %.3f\n", buffer->pts / 1e9f);
+    if (quiclysink->pipeline_clock != NULL)
+      g_print("Clock: %.3f\n", (gst_clock_get_time(quiclysink->pipeline_clock)
+                                 - GST_ELEMENT(quiclysink)->base_time) / 1e9f);
+  }
+  */
+  /*
+  if (buffer->pts != GST_CLOCK_TIME_NONE) {
+    g_print("TimeNow: %.3f\n", quiclysink->ctx.now->cb(quiclysink->ctx.now) - GST_ELEMENT(quiclysink)->base_time / 1e6f);
+    g_print("TimeClock: %.3f\n", (gst_clock_get_time(quiclysink->pipeline_clock)
+                                 - GST_ELEMENT(quiclysink)->base_time) / 1e9f);
+  }
+  */
+  /*
+  if (buffer->pts != GST_CLOCK_TIME_NONE) {
+    gint64 diff = buffer->pts - quiclysink->previousPts;
+    g_print("diff: %lu\n", diff);
+    quiclysink->previousPts = buffer->pts;
+  }
+  */
+  /* Trying to get the buffer duration */
+  /*
+  GstClockTime duration = GST_BUFFER_DURATION(buffer);
+  if (GST_CLOCK_TIME_IS_VALID(duration))
+    g_print("DURATION: %lu\n", duration);
+
+  GstSegment *segment = &sink->segment;
+  GstFormat format = segment->format;
+  guint64 rstart, rstop;
+  g_print("PTS: %.3f\n", GST_BUFFER_PTS(buffer) / 1e9f);
+  rstart = gst_segment_to_running_time(segment, format, GST_BUFFER_PTS(buffer));
+  g_print("Running_time: %.3f\n", rstart / 1e9f);
+  rstart = gst_segment_to_stream_time(segment, format, GST_BUFFER_PTS(buffer));
+  g_print("stream_time: %.3f\n", rstart / 1e9f);
+  */
+
   gst_buffer_map(buffer, &map, GST_MAP_READ);
 
   /* write buffer to quicly dgram buffer */
-  /* TODO: use internal buffer and send directly without copy */
   if (!quiclysink->stream_mode){
     /* Check if payload size fits in one quicly datagram frame */
     if (map.size > 1200) {
       g_printerr("Max payload size exceeded: %lu\n", map.size);
       return GST_FLOW_ERROR;
     }
-    write_dgram_buffer(quiclysink->dgram, map.data, map.size);
+    write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
+                       quiclysink->drop_late ? (quiclysink->ctx.now->cb(quiclysink->ctx.now) + 2) : 0);
   } else {
     quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);
   }
@@ -688,14 +754,6 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
   ++quiclysink->num_packets;
   quiclysink->num_bytes += map.size;
   gst_buffer_unmap(buffer, &map);
-
-  /* Emit feedback periodically */
-  /*
-  if (quiclysink->application_cc) {
-    if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > FEEDBACK_TIME_INTERVAL)
-      emit_feedback_signal(quiclysink);
-  }
-  */
 
   return GST_FLOW_OK;
 }
@@ -708,6 +766,7 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
   GstFlowReturn flow;
   guint num_buffers, i;
   GstMapInfo map;
+  gint64 now = quiclysink->ctx.now->cb(quiclysink->ctx.now);
   int ret;
 
   GST_LOG_OBJECT(quiclysink, "render_list");
@@ -728,7 +787,8 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
           g_printerr("Max payload size exceeded: %lu\n", map.size);
           return GST_FLOW_ERROR;
         }
-        write_dgram_buffer(quiclysink->dgram, map.data, map.size);
+        write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
+                           quiclysink->drop_late ? (now + 2 + i) : 0);
       } else {
         /* TODO: Move rtp framing to quiclysink.c */
         quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);
@@ -746,14 +806,6 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
   } else {
     flow = GST_FLOW_OK;
   }
-
-  /* Emit feedback periodically */
-  /*
-  if (quiclysink->application_cc) {
-    if((quiclysink->ctx.now->cb(quiclysink->ctx.now) - quiclysink->fb_timeout) > FEEDBACK_TIME_INTERVAL)
-      emit_feedback_signal(quiclysink);
-  }
-  */
 
   return flow;
 }
@@ -843,10 +895,14 @@ static int receive_packet(GstQuiclysink *quiclysink)
   return 0;
 }
 
-static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len) 
+/* 
+ * write packet to send buffer.
+ * Set max_time to 0 to ignore.
+ */
+static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len, gint64 max_time) 
 {
   int ret;
-  if ((ret = quicly_dgrambuf_egress_write(dgram, src, len)) != 0)
+  if ((ret = quicly_dgrambuf_egress_write(dgram, src, len, max_time)) != 0)
     g_printerr("quicly_dgrambuf_egress_write returns: %i\n", ret);
 }
 
@@ -1057,9 +1113,8 @@ Exit:
 /* Obtain the pipeline clock and schedule a callback for receving quic packets */
 static gboolean gst_quiclysink_sched_cbs(GstQuiclysink *quiclysink, GstClock *clock)
 {
-  //GstQuiclysink *quiclysink = GST_QUICLYSINK(ele);
   gboolean ret = TRUE;
-  //if (GST_IS_CLOCK(clock)) {
+
   if ((quiclysink->clockId = gst_clock_new_periodic_id(clock, 
                                gst_clock_get_internal_time(clock), 
                                RECEIVE_CLOCK_TIME_NS)) == NULL)
@@ -1068,7 +1123,7 @@ static gboolean gst_quiclysink_sched_cbs(GstQuiclysink *quiclysink, GstClock *cl
   if (gst_clock_id_wait_async(quiclysink->clockId, receive_async_cb, quiclysink, NULL) != GST_CLOCK_OK)
     ret = FALSE;
 
-  if (quiclysink->application_cc) {
+  if (quiclysink->feedback_active) {
     if ((quiclysink->fbClockId = gst_clock_new_periodic_id(clock, 
                                 gst_clock_get_internal_time(clock), 
                                 FEEDBACK_TIME_INTERVAL_NS)) == NULL)
@@ -1079,7 +1134,17 @@ static gboolean gst_quiclysink_sched_cbs(GstQuiclysink *quiclysink, GstClock *cl
   }
 
   return ret;
-  //return GST_ELEMENT_CLASS(gst_quiclysink_parent_class)->set_clock(ele, clock);
+}
+
+gboolean gst_quiclysink_set_clock(GstElement *element, GstClock *clock)
+{
+  GstQuiclysink *quiclysink = GST_QUICLYSINK(element);
+
+  if (GST_IS_CLOCK(clock)) {
+    quiclysink->pipeline_clock = clock;
+  }
+
+  return GST_ELEMENT_CLASS(gst_quiclysink_parent_class)->set_clock(element, clock);
 }
 
 static gboolean

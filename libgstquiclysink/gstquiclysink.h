@@ -87,6 +87,10 @@ struct _GstQuiclysink
 
   gboolean auto_caps_exchange;
   gboolean application_cc;
+  gboolean feedback_active;
+  GstClock *pipeline_clock;
+  GstClockTime previousPts;
+  gboolean drop_late;
 };
 
 struct _GstQuiclysinkClass

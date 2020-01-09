@@ -139,6 +139,7 @@ static int quicly_streambuf_egress_write_rtp_framing(quicly_stream_t *stream, co
 /* dgram buff  */
 /* TODO: Refactor ingress buffer handling -> BufferLists */
 typedef struct st_quicly_dgram_listbuf_vec_t {
+    int64_t max_time;
     size_t len;
     void *data;
 } quicly_dgram_listbuf_vec_t;
@@ -158,8 +159,8 @@ typedef struct st_quicly_dgrambuf_t {
 int quicly_dgrambuf_create(quicly_dgram_t *dgram, size_t sz);
 void quicly_dgrambuf_egress_shift(quicly_dgram_t *dgram, size_t delta);
 int quicly_dgrambuf_egress_emit(quicly_dgram_t *dgram, void *dst, size_t *len);
-int quicly_dgrambuf_egress_write(quicly_dgram_t *dgram, const void *src, size_t len);
-int quicly_dgrambuf_write(quicly_dgram_t *dgram, quicly_dgram_listbuf_t *buf, const void *src, size_t len);
+int quicly_dgrambuf_egress_write(quicly_dgram_t *dgram, const void *src, size_t len, int64_t max_time);
+int quicly_dgrambuf_write(quicly_dgram_t *dgram, quicly_dgram_listbuf_t *buf, const void *src, size_t len, int64_t max_time);
 int quicly_dgrambuf_write_vec(quicly_dgram_t *dgram, quicly_dgram_listbuf_t *db, quicly_dgram_listbuf_vec_t *vec);
 int quicly_dgrambuf_ingress_receive(quicly_dgram_t *dgram, const void *src, size_t len);
 void quicly_dgrambuf_ingress_shift(quicly_dgram_t *dgram, size_t delta);
@@ -171,6 +172,7 @@ int quicly_dgrambuf_emit(quicly_dgram_listbuf_t *b, void *dst, size_t *len);
 static size_t quicly_dgram_can_get_data(quicly_dgram_t *dgram);
 static size_t quicly_dgram_can_send(quicly_dgram_t *dgram);
 static size_t quicly_dgram_debug(quicly_dgram_t *dgram);
+static int64_t quicly_dgram_get_expire_time(quicly_dgram_t *dgram);
 
 inline size_t quicly_dgram_can_get_data(quicly_dgram_t *dgram)
 {
@@ -182,6 +184,19 @@ inline size_t quicly_dgram_can_get_data(quicly_dgram_t *dgram)
         return bf->ingress.vecs.entries[0].len;
     } else {
         return 0;
+    }
+}
+
+inline int64_t quicly_dgram_get_expire_time(quicly_dgram_t *dgram)
+{
+    if (dgram == NULL)
+        return -1;
+
+    quicly_dgrambuf_t *bf = (quicly_dgrambuf_t *)dgram->data;
+    if (bf->egress.vecs.size > 0) {
+        return bf->egress.vecs.entries[0].max_time;
+    } else {
+        return -1;
     }
 }
 

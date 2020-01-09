@@ -65,6 +65,7 @@ typedef struct _AppData
     gchar *key_file;
     gchar *host;
     FILE *stat_file_path;
+    gchar *saveToFilePath;
     gint port;
     gboolean headless;
     gboolean stream_mode;
@@ -77,6 +78,8 @@ typedef struct _AppData
     gboolean scream;
     gboolean camera;
     gboolean verbose;
+    gboolean quicNoCC;
+    gboolean quic_drop_late;
     Gst_elements elements;
     Stats stats;
     GstClockTime refTime;
@@ -754,9 +757,11 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
         g_object_set(rtpSink, "bind-port", sdata->port, 
                           "cert", sdata->cert_file,
                           "key", sdata->key_file, NULL);
-
-        if (sdata->scream)
+        if (sdata->quicNoCC)
             g_object_set(rtpSink, "app-cc", TRUE, NULL);
+
+        if (sdata->scream) 
+            g_object_set(rtpSink, "app-cc", TRUE, "feedback", TRUE, NULL);
 
         if (sdata->stream_mode)
             g_object_set(rtpSink, "stream-mode", TRUE, NULL);
@@ -764,6 +769,9 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
         if (sdata->debug) {
             g_signal_connect(rtpSink, "on-feedback-report", G_CALLBACK(cb_on_feedback_report), NULL);
         }
+
+        if (sdata->quic_drop_late)
+            g_object_set(rtpSink, "drop-late", TRUE, NULL);
     }
     sdata->elements.net = rtpSink;
 
@@ -1127,6 +1135,9 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
 
     if (cdata->headless) {
         sink = gst_element_factory_make("fakesink", "sink");
+    } else if (cdata->saveToFilePath != NULL) {
+        sink = gst_element_factory_make("filesink", "sink");
+        g_object_set(sink, "location", cdata->saveToFilePath, NULL);
     } else {
         sink = gst_element_factory_make("glimagesink", "sink");
         g_object_set(sink, "sync", FALSE, "async", FALSE, NULL);
@@ -1144,6 +1155,11 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
         gst_bin_add_many(bin, scream, depay, decoder, sink, NULL);
         gst_element_link_many(scream, depay, decoder, sink, NULL);
         ghostSink = scream;
+    } else if (cdata->saveToFilePath != NULL) {
+        GstElement *mux = gst_element_factory_make("matroskamux", "mux");
+        GstElement *parse = gst_element_factory_make("h264parse", "parse");
+        gst_bin_add_many(bin, depay, parse, mux, sink, queue, NULL);
+        gst_element_link_many(queue, depay, parse, mux, sink, NULL);
     } else {
         gst_bin_add_many(bin, depay, decoder, queue, sink, NULL);
         gst_element_link_many(queue, depay, decoder, sink, NULL);
@@ -1329,12 +1345,15 @@ int main (int argc, char *argv[])
     data.aux = FALSE;
     data.scream = FALSE;
     data.camera = FALSE;
+    data.quic_drop_late = FALSE;
     data.file_path = NULL;
     data.cert_file = NULL;
     data.key_file = NULL;;
     data.elements.jitterbuf = NULL;
     data.stat_file_path = NULL;
     data.verbose = FALSE;
+    data.quicNoCC = FALSE;
+    data.saveToFilePath = NULL;
     gchar *logfile = NULL;
     GOptionContext *ctx;
     GError *err = NULL;
@@ -1361,11 +1380,13 @@ int main (int argc, char *argv[])
         {"key", 'k', 0, G_OPTION_ARG_STRING, &data.key_file,
          "Server (Quic). Key file path", NULL},
         {"plugin-path", 'P', 0, G_OPTION_ARG_STRING, &plugins,
-         "custom plugin folder", NULL},
+         "custom gstreamer plugin folder", NULL},
         {"stream_mode", 'm', 0, G_OPTION_ARG_NONE, &data.stream_mode,
          "Server (Quic). Use streams instead of datagrams", NULL},
         {"debug", 'd', 0, G_OPTION_ARG_NONE, &data.debug,
          "Print debug info", NULL},
+        {"disableCC", 'D', 0, G_OPTION_ARG_NONE, &data.quicNoCC,
+         "Disable quic CC. Default: False.", NULL},
         {"host", 'h', 0, G_OPTION_ARG_STRING, &data.host,
          "Host to connect to.", NULL},
         {"port", 'p', 0, G_OPTION_ARG_INT, &data.port,
@@ -1374,6 +1395,10 @@ int main (int argc, char *argv[])
          "Client. Use fakesink", NULL},
         {"logfile", 'l', 0, G_OPTION_ARG_STRING, &logfile,
          "Log stats. Filepath or stdout", NULL}, 
+        {"dropLate", 'L', 0, G_OPTION_ARG_NONE, &data.quic_drop_late,
+         "Quic. Drop late packets. Default: FALSE", NULL}, 
+        {"filesink", 'S', 0, G_OPTION_ARG_STRING, &data.saveToFilePath,
+         "Save video to file", NULL},
         {"verbose", 'v', 0, G_OPTION_ARG_NONE, &data.verbose,
          "Print additional information", NULL}, 
         {NULL}
@@ -1437,10 +1462,10 @@ int main (int argc, char *argv[])
             } else {
                 /* Print value explanation for client */
                 if (data.udp)
-                    fprintf(data.stat_file_path, "#args:time, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                    fprintf(data.stat_file_path, "#args:time, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
                 else
                     fprintf(data.stat_file_path, "#args:time, packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, "
-                                                 "jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter, rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                                                 "jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
             }
         }
         g_free(logfile);

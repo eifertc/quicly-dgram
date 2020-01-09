@@ -283,15 +283,15 @@ int quicly_dgrambuf_create(quicly_dgram_t *dgram, size_t sz)
     return 0;
 }
 
-int quicly_dgrambuf_egress_write(quicly_dgram_t *dgram, const void *src, size_t len)
+int quicly_dgrambuf_egress_write(quicly_dgram_t *dgram, const void *src, size_t len, int64_t max_time)
 {
     quicly_dgrambuf_t *dbuf = (quicly_dgrambuf_t *)dgram->data;
-    return quicly_dgrambuf_write(dgram, &dbuf->egress, src, len);
+    return quicly_dgrambuf_write(dgram, &dbuf->egress, src, len, max_time);
 }
 
-int quicly_dgrambuf_write(quicly_dgram_t *dgram, quicly_dgram_listbuf_t *buf, const void *src, size_t len)
+int quicly_dgrambuf_write(quicly_dgram_t *dgram, quicly_dgram_listbuf_t *buf, const void *src, size_t len, int64_t max_time)
 {
-    quicly_dgram_listbuf_vec_t vec = {len, NULL};
+    quicly_dgram_listbuf_vec_t vec = {max_time==0 ? INT64_MAX : max_time, len, NULL};
     int ret;
 
     if ((vec.data = malloc(len)) == NULL) {
@@ -328,7 +328,7 @@ int quicly_dgrambuf_write_vec(quicly_dgram_t *dgram, quicly_dgram_listbuf_t *db,
 int quicly_dgrambuf_ingress_receive(quicly_dgram_t *dgram, const void *src, size_t len)
 {
     quicly_dgrambuf_t *dbuf = (quicly_dgrambuf_t *)dgram->data;
-    return quicly_dgrambuf_write(dgram, &dbuf->ingress, src, len);
+    return quicly_dgrambuf_write(dgram, &dbuf->ingress, src, len, 0);
 }
 
 void quicly_dgrambuf_ingress_shift(quicly_dgram_t *dgram, size_t delta)
