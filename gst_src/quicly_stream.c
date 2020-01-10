@@ -14,6 +14,9 @@
 
 #define STAT_TIME_NS 1000000000 /* get stats every second */
 //#define STAT_TIME_NS 500000000 /* get stats every half second */
+#define DEFAULT_RTP_MTU 1200
+#define DEFAULT_HOST "127.0.0.1"
+#define DEFAULT_PORT 5000
 
 int rtp_packet_num = 0;
 gssize rtp_bytes = 0;
@@ -67,6 +70,7 @@ typedef struct _AppData
     FILE *stat_file_path;
     gchar *saveToFilePath;
     gint port;
+    gint rtp_mtu;
     gboolean headless;
     gboolean stream_mode;
     gboolean rtcp;
@@ -826,7 +830,6 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
      * out of my filesrc. Without that, scream would not work
      */
     GstElement *identity = gst_element_factory_make("identity", "identity");
-    g_object_set(identity, "sync", TRUE, NULL);
     lastEle = rtph264pay;
 
     /* Choose demuxer based on video container type*/
@@ -840,15 +843,14 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
         demux = gst_element_factory_make("qtdemux", "demux");
     }
 
-    if (!videoBin || !filesrc || !demux || !rtph264pay) {
+    if (!videoBin || !filesrc || !demux || !rtph264pay || !identity) {
         g_printerr ("One element could not be created. Exiting.\n");
         return NULL;
     }
 
+    g_object_set(identity, "sync", TRUE, NULL);
     g_object_set(G_OBJECT(filesrc), "location", sdata->file_path, NULL);
-    
-    /* TODO: Set to 1280? That's the value I set as default in quiclysink? */
-    g_object_set(G_OBJECT(rtph264pay), "mtu", 1200, "config-interval", 2, NULL);
+    g_object_set(G_OBJECT(rtph264pay), "mtu", sdata->rtp_mtu, "config-interval", 2, NULL);
     //g_object_set(G_OBJECT(rtpmp4gpay), "mtu", 1200, NULL);
 
     /* Link with or without transcoding */
@@ -977,15 +979,6 @@ int run_server(AppData *sdata)
     if ((sdata->cert_file == NULL || sdata->key_file == NULL) && !sdata->udp) {
         g_printerr("Missing key/cert files\n");
         return -1;
-    }
-
-    if (sdata->port == 0) {
-        g_print("Default port: 5000\n");
-        sdata->port = 5000;
-    }
-
-    if (sdata->host == NULL) {
-        sdata->host = "127.0.0.1";
     }
 
     GstPipeline *pipe;
@@ -1267,11 +1260,6 @@ int run_client(AppData *cdata)
     GstBus *bus;
     GMainLoop *loop;
 
-    if (cdata->host == NULL)
-        cdata->host = "127.0.0.1";
-    if (cdata->port == 0)
-        cdata->port = 5000;
-
     loop = g_main_loop_new(NULL, FALSE);
     pipe = GST_PIPELINE(gst_pipeline_new("mainPipeline"));
 
@@ -1333,8 +1321,9 @@ int main (int argc, char *argv[])
 {
     /* Parse command line options */
     AppData data;
-    data.host = NULL;
-    data.port = 0;
+    data.host = DEFAULT_HOST;
+    data.port = DEFAULT_PORT;
+    data.rtp_mtu = DEFAULT_RTP_MTU;
     data.headless = FALSE;
     data.debug = FALSE;
     data.stream_mode = FALSE;
@@ -1383,6 +1372,8 @@ int main (int argc, char *argv[])
          "custom gstreamer plugin folder", NULL},
         {"stream_mode", 'm', 0, G_OPTION_ARG_NONE, &data.stream_mode,
          "Server (Quic). Use streams instead of datagrams", NULL},
+        {"rtp-mtu", 'M', 0, G_OPTION_ARG_INT, &data.rtp_mtu,
+         "MTU in rtp payloader (quic mtu is set to the same value + 40)", NULL},
         {"debug", 'd', 0, G_OPTION_ARG_NONE, &data.debug,
          "Print debug info", NULL},
         {"disableCC", 'D', 0, G_OPTION_ARG_NONE, &data.quicNoCC,
@@ -1440,7 +1431,11 @@ int main (int argc, char *argv[])
             }
             /* Print application info */
             // TODO: Add additional info, like quic with streams, rtp packet size, mtu, quic max segment size, etc.
-            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s\n", data.file_path ? "server" : "client", data.udp ? "udp" : "quic", data.scream ? "scream" : "none");
+            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s,rtp-mtu:%i\n", 
+                                        data.file_path ? "server" : "client", 
+                                        data.udp ? "udp" : (data.stream_mode ? "quic-stream" : "quic-dgram"),
+                                        data.scream ? "scream" : (data.quicNoCC ? "none" : "quic"),
+                                        data.rtp_mtu);
             if (data.file_path) {
                 /* Print value explanation for server */
                 char *s = (char *) malloc(300);
