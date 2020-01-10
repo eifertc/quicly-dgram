@@ -997,6 +997,10 @@ int run_server(AppData *sdata)
     g_signal_connect(bus, "message::eos", G_CALLBACK(cb_eos), loop);
     g_signal_connect(bus, "message::qos", G_CALLBACK(cb_qos), NULL);
     g_signal_connect(bus, "message::error", G_CALLBACK(cb_error), loop);
+    if (sdata->debug) {
+        g_signal_connect(bus, "message::state_changed", G_CALLBACK(cb_state_change), loop);
+        g_signal_connect(bus, "message::stream_status", G_CALLBACK(cb_stream_status), loop);
+    }
     gst_bus_add_signal_watch(bus);
     gst_object_unref (bus);
 
@@ -1021,8 +1025,8 @@ int run_server(AppData *sdata)
 
 
     if (sdata->rtcp && sdata->debug) {
-        //g_signal_connect(int_session, "on_receiving_rtcp", G_CALLBACK(cb_on_recv_rtcp), NULL);
-        //g_signal_connect(int_session, "on_send_rtcp", G_CALLBACK(cb_on_send_rtcp), NULL);
+        g_signal_connect(int_session, "on_receiving_rtcp", G_CALLBACK(cb_on_recv_rtcp), NULL);
+        g_signal_connect(int_session, "on_send_rtcp", G_CALLBACK(cb_on_send_rtcp), NULL);
     }
 
     /* start the pipeline */
@@ -1141,7 +1145,6 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
         return NULL;
     }
 
-    /* TODO: If using quic with feedback, don't use the screamrx element */
     if (cdata->scream && cdata->udp) {
         GstElement *scream = gst_element_factory_make("gscreamrx", "scream");
 
@@ -1346,7 +1349,7 @@ int main (int argc, char *argv[])
     gchar *logfile = NULL;
     GOptionContext *ctx;
     GError *err = NULL;
-    gchar *plugins = NULL;
+    gchar **plugins = NULL;
     memset(&data.stats, 0, sizeof(Stats));
     
     GOptionEntry entries[] = {
@@ -1368,7 +1371,7 @@ int main (int argc, char *argv[])
          "Server (Quic). Certificate file path", NULL},
         {"key", 'k', 0, G_OPTION_ARG_STRING, &data.key_file,
          "Server (Quic). Key file path", NULL},
-        {"plugin-path", 'P', 0, G_OPTION_ARG_STRING, &plugins,
+        {"plugin-path", 'P', 0, G_OPTION_ARG_STRING_ARRAY, &plugins,
          "custom gstreamer plugin folder", NULL},
         {"stream_mode", 'm', 0, G_OPTION_ARG_NONE, &data.stream_mode,
          "Server (Quic). Use streams instead of datagrams", NULL},
@@ -1409,33 +1412,38 @@ int main (int argc, char *argv[])
 
     gst_init(NULL, NULL);
 
-    /* Set custom plugin path */
-    if (plugins == NULL)
-        plugins = "./libgst";
+    /* Set plugin paths */
+    if (plugins == NULL) {
+        g_print("No plugin paths specified. Trying default dev paths.\n");
+        plugins = malloc(3 * sizeof(gchar*));
+        plugins[0] = "./libgst";
+        plugins[1] = "../../scream/code/gscream/gst-gscreamtx/gst-plugin/src/.libs";
+        plugins[2] = "../../scream/code/gscream/gst-gscreamrx/gst-plugin/src/.libs";
+    } 
+
     GstRegistry *reg;
     reg = gst_registry_get();
-    gst_registry_scan_path(reg, plugins);
-    /* TODO: Remove and replace with multiple possible plugin paths? */
-    gst_registry_scan_path(reg, "../../scream/code/gscream/gst-gscreamtx/gst-plugin/src/.libs");
-    gst_registry_scan_path(reg, "../../scream/code/gscream/gst-gscreamrx/gst-plugin/src/.libs");
+    int len = sizeof(plugins) / sizeof(plugins[0]);
+    for (int i = 0; i < len; i++) {
+        gst_registry_scan_path(reg, plugins[i]);
+    }
 
     if (logfile != NULL) {
         if (strcmp(logfile, "stdout") == 0) {
             data.stat_file_path = stdout;
         } else {
-            // TODO: change to append
-            data.stat_file_path = fopen(logfile, "w");
+            data.stat_file_path = fopen(logfile, "a");
             if (data.stat_file_path == NULL) {
                 g_printerr("Could not open file. Err: %s\n", strerror(errno));
                 return -1;
             }
             /* Print application info */
             // TODO: Add additional info, like quic with streams, rtp packet size, mtu, quic max segment size, etc.
-            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s,rtp-mtu:%i\n", 
+            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s,rtp-mtu:%i,drop-late:%s\n", 
                                         data.file_path ? "server" : "client", 
                                         data.udp ? "udp" : (data.stream_mode ? "quic-stream" : "quic-dgram"),
                                         data.scream ? "scream" : (data.quicNoCC ? "none" : "quic"),
-                                        data.rtp_mtu);
+                                        data.rtp_mtu, data.quic_drop_late ? "True" : "False");
             if (data.file_path) {
                 /* Print value explanation for server */
                 char *s = (char *) malloc(300);
