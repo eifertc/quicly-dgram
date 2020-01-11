@@ -1091,8 +1091,10 @@ int run_server(AppData *sdata)
     g_main_loop_run(loop);
 
     /* Out of the main loop */
-    if (sdata->stat_file_path)
+    if (sdata->stat_file_path) {
+        gst_clock_id_unschedule(sdata->elements.clockId);
         gst_clock_id_unref(sdata->elements.clockId);
+    }
 
     if (sdata->verbose)
         print_server_stats(sdata);
@@ -1369,8 +1371,10 @@ int run_client(AppData *cdata)
     g_main_loop_run(loop);
 
     /* Out of the main loop */
-    if (cdata->stat_file_path)
+    if (cdata->stat_file_path) {
+        gst_clock_id_unschedule(cdata->elements.clockId);
         gst_clock_id_unref(cdata->elements.clockId);
+    }
     
     if (cdata->verbose)
         print_client_stats(cdata);
