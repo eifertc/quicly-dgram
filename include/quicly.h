@@ -222,6 +222,10 @@ typedef struct st_quicly_transport_parameters_t {
      */
     uint8_t ack_delay_exponent;
     /**
+     * 
+     */
+    uint16_t max_packet_size;
+    /**
      * in milliseconds; quicly ignores the value set for quicly_context_t::transport_parameters
      */
     uint16_t max_ack_delay;

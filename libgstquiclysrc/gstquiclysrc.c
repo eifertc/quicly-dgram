@@ -357,6 +357,10 @@ gst_quiclysrc_set_property (GObject * object, guint property_id,
     case PROP_BIND_PORT:
       quiclysrc->bind_port = g_value_get_int(value);
       break;
+    case PROP_QUICLY_MTU: {
+      guint tmp = g_value_get_uint(value);
+      quiclysrc->quicly_mtu = (tmp + 28 > 1280) ? 1252 : tmp;
+    }
     case PROP_CAPS: {
       const GstCaps *new_caps_val = gst_value_get_caps(value);
       GstCaps *new_caps;

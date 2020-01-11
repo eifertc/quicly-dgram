@@ -761,6 +761,8 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
         g_object_set(rtpSink, "bind-port", sdata->port, 
                           "cert", sdata->cert_file,
                           "key", sdata->key_file, NULL);
+        if (sdata->rtp_mtu != 0)
+             g_object_set(rtpSink, "quicly-mtu", sdata->rtp_mtu, NULL);
         if (sdata->quicNoCC)
             g_object_set(rtpSink, "app-cc", TRUE, NULL);
 
@@ -850,7 +852,11 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
 
     g_object_set(identity, "sync", TRUE, NULL);
     g_object_set(G_OBJECT(filesrc), "location", sdata->file_path, NULL);
-    g_object_set(G_OBJECT(rtph264pay), "mtu", sdata->rtp_mtu, "config-interval", 2, NULL);
+    if (sdata->rtp_mtu > 1252)
+        sdata->rtp_mtu = 1252;
+    g_print("RTP: %i\n", sdata->rtp_mtu);
+    g_object_set(G_OBJECT(rtph264pay), "mtu", sdata->rtp_mtu == 0 ? DEFAULT_RTP_MTU : sdata->rtp_mtu,
+    "config-interval", 2, NULL);
     //g_object_set(G_OBJECT(rtpmp4gpay), "mtu", 1200, NULL);
 
     /* Link with or without transcoding */
@@ -862,7 +868,6 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
         g_object_set(encoder, "bitrate", 2000, "tune", 4, NULL);
 
         if (sdata->scream) {
-            g_print("creating SCREAM\n");
             GstElement *scream = gst_element_factory_make("gscreamtx", "scream");
             //GstElement *cam = gst_element_factory_make("v412src", "camsrc");
             g_object_set(scream, "media-src", 0, NULL);
@@ -876,7 +881,7 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
             gst_element_link_many(decoder, identity, queue2_1, encoder, queue2_2, rtph264pay, scream, NULL);
             lastEle = scream;
         } else {
-            /* Second queue after encoder? */
+            /* Transcode only */
             gst_bin_add_many (videoBin, filesrc, demux, decoder, identity,
                               queue2_1, queue2_2, encoder, rtph264pay, NULL);
             gst_element_link_many(decoder, identity, queue2_1, encoder, queue2_2, rtph264pay, NULL);
@@ -887,11 +892,11 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
         g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), decoder);
         
     } else {
-        gst_bin_add_many(videoBin, filesrc, demux, identity, rtph264pay, NULL);
+        gst_bin_add_many(videoBin, filesrc, demux, identity, queue2_1, rtph264pay, NULL);
         if (!gst_element_link(filesrc, demux))
             g_warning("Failed to link filesrc\n");
         g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), identity);
-        gst_element_link_many(identity, rtph264pay, NULL);
+        gst_element_link_many(identity, queue2_1, rtph264pay, NULL);
     }
 
     if (sdata->debug) {
@@ -1326,7 +1331,7 @@ int main (int argc, char *argv[])
     AppData data;
     data.host = DEFAULT_HOST;
     data.port = DEFAULT_PORT;
-    data.rtp_mtu = DEFAULT_RTP_MTU;
+    data.rtp_mtu = 0;
     data.headless = FALSE;
     data.debug = FALSE;
     data.stream_mode = FALSE;
@@ -1376,7 +1381,8 @@ int main (int argc, char *argv[])
         {"stream_mode", 'm', 0, G_OPTION_ARG_NONE, &data.stream_mode,
          "Server (Quic). Use streams instead of datagrams", NULL},
         {"rtp-mtu", 'M', 0, G_OPTION_ARG_INT, &data.rtp_mtu,
-         "MTU in rtp payloader (quic mtu is set to the same value + 40)", NULL},
+         "MTU in rtp payloader. Default: 1200. Max value is 1252 currently, because of hardcoded macro in quicly",
+          NULL},
         {"debug", 'd', 0, G_OPTION_ARG_NONE, &data.debug,
          "Print debug info", NULL},
         {"disableCC", 'D', 0, G_OPTION_ARG_NONE, &data.quicNoCC,
@@ -1415,17 +1421,20 @@ int main (int argc, char *argv[])
     /* Set plugin paths */
     if (plugins == NULL) {
         g_print("No plugin paths specified. Trying default dev paths.\n");
-        plugins = malloc(3 * sizeof(gchar*));
+        plugins = malloc(4 * sizeof(gchar*));
         plugins[0] = "./libgst";
         plugins[1] = "../../scream/code/gscream/gst-gscreamtx/gst-plugin/src/.libs";
         plugins[2] = "../../scream/code/gscream/gst-gscreamrx/gst-plugin/src/.libs";
+        plugins[3] = NULL;
     } 
 
     GstRegistry *reg;
     reg = gst_registry_get();
-    int len = sizeof(plugins) / sizeof(plugins[0]);
-    for (int i = 0; i < len; i++) {
-        gst_registry_scan_path(reg, plugins[i]);
+    for (int i = 0; plugins[i] != NULL; i++) {
+        if (gst_registry_scan_path(reg, plugins[i]) == FALSE) {
+            g_print("Invalid Plugin Path: %s\n", plugins[i]);
+            return -1;
+        }
     }
 
     if (logfile != NULL) {
@@ -1443,7 +1452,8 @@ int main (int argc, char *argv[])
                                         data.file_path ? "server" : "client", 
                                         data.udp ? "udp" : (data.stream_mode ? "quic-stream" : "quic-dgram"),
                                         data.scream ? "scream" : (data.quicNoCC ? "none" : "quic"),
-                                        data.rtp_mtu, data.quic_drop_late ? "True" : "False");
+                                        data.rtp_mtu == 0 ? DEFAULT_RTP_MTU : data.rtp_mtu, 
+                                        data.quic_drop_late ? "True" : "False");
             if (data.file_path) {
                 /* Print value explanation for server */
                 char *s = (char *) malloc(300);

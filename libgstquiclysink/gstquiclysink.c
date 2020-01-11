@@ -310,6 +310,7 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->clockId = NULL;
   quiclysink->fbClockId = NULL;
   quiclysink->pipeline_clock = NULL;
+  quiclysink->quicly_mtu = QUICLY_DEFAULT_MTU;
 
   /* Setup quicly and tls context */
   quiclysink->tlsctx.random_bytes = ptls_openssl_random_bytes;
@@ -380,6 +381,12 @@ gst_quiclysink_set_property (GObject * object, guint property_id,
     case PROP_BIND_PORT:
       quiclysink->bind_port = g_value_get_int(value);
       break;
+    case PROP_QUICLY_MTU: {
+      /* TODO: Remove the max limit of 1280, after removing the macro in quicly */
+      guint tmp = g_value_get_uint(value);
+      quiclysink->quicly_mtu = (tmp + 28 > 1280) ? 1252 : tmp + 28;
+      break;
+    }
     case PROP_CERTIFICATE:
       g_free(quiclysink->cert);
       if (g_value_get_string(value) == NULL)
@@ -739,8 +746,8 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
   /* write buffer to quicly dgram buffer */
   if (!quiclysink->stream_mode){
     /* Check if payload size fits in one quicly datagram frame */
-    if (map.size > 1200) {
-      g_printerr("Max payload size exceeded: %lu\n", map.size);
+    if (map.size > quiclysink->quicly_mtu) {
+      g_printerr("Max payload size exceeded: %lu. MTU: %u\n", map.size, quiclysink->quicly_mtu);
       return GST_FLOW_ERROR;
     }
     write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
@@ -783,7 +790,7 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
     if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
       if (!quiclysink->stream_mode) {
         /* Check if payload size fits in one quicly datagram frame */
-        if (map.size > 1200) {
+        if (map.size > quiclysink->quicly_mtu) {
           g_printerr("Max payload size exceeded: %lu\n", map.size);
           return GST_FLOW_ERROR;
         }
