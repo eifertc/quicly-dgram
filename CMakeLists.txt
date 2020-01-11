@@ -151,12 +151,6 @@ TARGET_COMPILE_OPTIONS(quicly_stream
                        PUBLIC
                        ${GST_CFLAGS})
 
-ADD_EXECUTABLE(udp_stream gst_src/udp_stream.c)
-TARGET_LINK_LIBRARIES(udp_stream ${GST_LIBRARIES})
-TARGET_COMPILE_OPTIONS(udp_stream
-                       PUBLIC
-                       ${GST_CFLAGS})
-
 # oroginal cli compile targets
 #ADD_EXECUTABLE(cli ${PICOTLS_OPENSSL_FILES} src/cli.c)
 #TARGET_LINK_LIBRARIES(cli quicly ${OPENSSL_LIBRARIES} ${CMAKE_DL_LIBS})

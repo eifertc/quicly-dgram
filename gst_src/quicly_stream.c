@@ -44,6 +44,7 @@ typedef struct {
     GstElement *session;
     GstElement *jitterbuf;
     GstElement *scream;
+    GstElement *rtcpSink;
     GObject *internal_session;
     GstClockID clockId;
     GstPipeline *pipeline;
@@ -59,6 +60,9 @@ typedef struct {
     uint64_t jitbuf_pushed;
     uint64_t jitbuf_lost;
     uint64_t jitbuf_late;
+    uint64_t rtcp_bytes_sent;
+    uint64_t rtcp_packets_sent;
+    uint64_t bytes_received_rtp_payload;
 } Stats;
 
 typedef struct _AppData
@@ -143,7 +147,7 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
 
     if (data->file_path) {
         /* Server stats */
-        guint64 bytes_sent, packets_sent;
+        guint64 bytes_sent, packets_sent, rtcp_bytes_sent = 0, rtcp_packets_sent = 0;
         if (data->udp) {
             g_signal_emit_by_name(data->elements.net, "get-stats", 
                                     data->host, data->port, &stats);
@@ -151,10 +155,25 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
             gst_structure_free(stats);
 
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu", time, packets_sent-data->stats.packets_sent, bytes_sent-data->stats.packets_sent);
+            if (data->rtcp) {
+                g_signal_emit_by_name(data->elements.rtcpSink, "get-stats", 
+                                    data->host, data->port + 1, &stats);
+                gst_structure_get_uint64(stats, "bytes-sent", &rtcp_bytes_sent);
+                gst_structure_get_uint64(stats, "packets-sent", &rtcp_packets_sent);
+                gst_structure_free(stats);
+            }
+
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu", time, 
+                            packets_sent-data->stats.packets_sent, 
+                            bytes_sent-data->stats.packets_sent,
+                            rtcp_packets_sent-data->stats.rtcp_packets_sent,
+                            rtcp_bytes_sent-data->stats.rtcp_bytes_sent);
+            data->stats.rtcp_packets_sent = rtcp_packets_sent;
+            data->stats.rtcp_bytes_sent = rtcp_bytes_sent;
+
         } else {
             guint64 packets_received, packets_lost, 
-                    bytes_received, bytes_in_flight;
+                    bytes_received, bytes_in_flight, bytes_sent_media;
             guint srtt, cwnd;
             g_object_get(data->elements.net, "stats", &stats, NULL);
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
@@ -164,17 +183,21 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
             gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
             gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
             gst_structure_get_uint64(stats, "bytes-in-flight", &bytes_in_flight);
+            gst_structure_get_uint64(stats, "bytes-sent-media", &bytes_sent_media);
             gst_structure_get_uint(stats, "rtt-smoothed", &srtt);
             gst_structure_get_uint(stats, "cwnd", &cwnd);
             gst_structure_free(stats);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u", time,
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u", time,
                     packets_sent-data->stats.packets_sent, packets_lost-data->stats.packets_lost, 
-                    packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent, bytes_received-data->stats.bytes_received, 
+                    packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent, 
+                    bytes_sent_media-data->stats.rtcp_bytes_sent,
+                    bytes_received-data->stats.bytes_received, 
                     bytes_in_flight, srtt, cwnd);
             
             data->stats.packets_lost = packets_lost;
             data->stats.packets_received = packets_received;
             data->stats.bytes_received = bytes_received;
+            data->stats.rtcp_bytes_sent = bytes_sent_media;
         }
         data->stats.bytes_sent = bytes_sent;
         data->stats.packets_sent = packets_sent;
@@ -207,6 +230,7 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
         gboolean internal;
         guint rtpsrc_jitter = 0;
         guint64 bitrate = 0;
+        guint64 packets_received, bytes_received_rtp_payload, packets_sent = 0, bytes_sent = 0;
         g_object_get(data->elements.internal_session, "sources", &arr, NULL);
         if (arr) {
             for (int i = 0; i < arr->n_values; i++) {
@@ -217,6 +241,8 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
                 if (!internal) {
                     gst_structure_get_uint(stats, "jitter", &rtpsrc_jitter);
                     gst_structure_get_uint64(stats, "bitrate", &bitrate);
+                    gst_structure_get_uint64(stats, "octets-received", &bytes_received_rtp_payload);
+                    gst_structure_get_uint64(stats, "packets-received", &packets_received);
                 }
                 gst_structure_free(stats);
             }
@@ -227,29 +253,47 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
         #pragma GCC diagnostic pop
 
         if (data->udp) {
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%u,%lu\n", time, pushed-data->stats.jitbuf_pushed, 
+            if (data->rtcp) {
+                g_signal_emit_by_name(data->elements.rtcpSink, "get-stats", 
+                                    data->host, data->port + 5, &stats);
+                gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
+                gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
+                gst_structure_free(stats);
+            }
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu\n", time, packets_received-data->stats.packets_received, 
+                    bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
+                    packets_sent-data->stats.packets_sent,
+                    bytes_sent-data->stats.bytes_sent,
+                    pushed-data->stats.jitbuf_pushed, 
                     rtp_lost-data->stats.jitbuf_lost, late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
         } else {
             /* quicly */
             g_object_get(data->elements.net, "stats", &stats, NULL);
-            guint64 packets_sent, packets_lost, packets_received, bytes_sent, bytes_received;
+            guint64 packets_lost, bytes_received_quic_payload, bytes_received;
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
             gst_structure_get_uint64(stats, "packets-lost", &packets_lost);
             gst_structure_get_uint64(stats, "packets-received", &packets_received);
             gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
             gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
+            gst_structure_get_uint64(stats, "bytes-received-media", &bytes_received_quic_payload);
             gst_structure_free(stats);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu\n", time,
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu\n", time,
                     packets_sent-data->stats.packets_sent, packets_lost-data->stats.packets_lost, 
-                    packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent, bytes_received-data->stats.bytes_received, 
+                    packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent,
+                    bytes_received-data->stats.bytes_received, 
+                    bytes_received_quic_payload-data->stats.rtcp_bytes_sent,
+                    bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
                     pushed-data->stats.jitbuf_pushed, rtp_lost-data->stats.jitbuf_lost, 
                     late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
-            data->stats.packets_sent = packets_sent;
-            data->stats.packets_lost = packets_lost;
-            data->stats.packets_received = packets_received;
+
             data->stats.bytes_sent = bytes_sent;
+            data->stats.rtcp_bytes_sent = bytes_received_quic_payload;
             data->stats.bytes_received = bytes_received;
         }
+        data->stats.bytes_received_rtp_payload = bytes_received_rtp_payload;
+        data->stats.packets_lost = packets_lost;
+        data->stats.packets_sent = packets_sent;
+        data->stats.packets_received = packets_received;
         data->stats.jitbuf_pushed = pushed;
         data->stats.jitbuf_lost = rtp_lost;
         data->stats.jitbuf_late = late;
@@ -763,6 +807,7 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
                           "key", sdata->key_file, NULL);
         if (sdata->rtp_mtu != 0)
              g_object_set(rtpSink, "quicly-mtu", sdata->rtp_mtu, NULL);
+
         if (sdata->quicNoCC)
             g_object_set(rtpSink, "app-cc", TRUE, NULL);
 
@@ -798,6 +843,8 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
         padName = g_strdup_printf ("recv_rtcp_sink_%u", session->sessionNum);
         gst_element_link_pads (rtcpSrc, "src", rtpBin, padName);
         g_free (padName);
+
+        sdata->elements.rtcpSink = rtcpSink;
     } else {
         gst_bin_add_many(GST_BIN(pipe), rtpSink, session->input, NULL);
     }
@@ -854,7 +901,6 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
     g_object_set(G_OBJECT(filesrc), "location", sdata->file_path, NULL);
     if (sdata->rtp_mtu > 1252)
         sdata->rtp_mtu = 1252;
-    g_print("RTP: %i\n", sdata->rtp_mtu);
     g_object_set(G_OBJECT(rtph264pay), "mtu", sdata->rtp_mtu == 0 ? DEFAULT_RTP_MTU : sdata->rtp_mtu,
     "config-interval", 2, NULL);
     //g_object_set(G_OBJECT(rtpmp4gpay), "mtu", 1200, NULL);
@@ -1102,6 +1148,8 @@ add_client_stream(GstElement *pipe, GstElement *rtpBin, SessionData *session, Ap
         padName = g_strdup_printf("send_rtcp_src_%u", session->sessionNum);
         gst_element_link_pads(rtpBin, padName, rtcpSink, "sink");
         g_free(padName);
+
+        adata->elements.rtcpSink = rtcpSink;
     } else {
         gst_bin_add(GST_BIN(pipe), rtpSrc);
     }
@@ -1229,6 +1277,17 @@ void print_client_stats(AppData *cdata)
 
                     g_print("##### RTPSrc Nr.%i stats:\n", i);
                     g_print("Bitrate: %luKbit/s. Jitter: %ums\n", bitrate/1000, jitter);
+
+                    guint64 bytes_received;
+                    guint64 bytes_sent;
+                    guint64 packets_sent;
+                    guint64 packets_received;
+                    gst_structure_get_uint64(stats, "octets-received", &bytes_received);
+                    gst_structure_get_uint64(stats, "octets-sent", &bytes_sent);
+                    gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
+                    gst_structure_get_uint64(stats, "packets-received", &packets_received);
+                    g_print("Bytes_sent: %lu. Bytes_received: %lu\n", bytes_sent, bytes_received);
+                    g_print("Packets_sent: %lu. Packets_received: %lu\n", packets_sent, packets_received);
 
                     gst_structure_free(stats);
                 }
@@ -1447,21 +1506,22 @@ int main (int argc, char *argv[])
                 return -1;
             }
             /* Print application info */
-            // TODO: Add additional info, like quic with streams, rtp packet size, mtu, quic max segment size, etc.
-            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s,rtp-mtu:%i,drop-late:%s\n", 
+            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s,rtp-mtu:%i,drop-late:%s,output-file:%s,video:%s\n", 
                                         data.file_path ? "server" : "client", 
                                         data.udp ? "udp" : (data.stream_mode ? "quic-stream" : "quic-dgram"),
                                         data.scream ? "scream" : (data.quicNoCC ? "none" : "quic"),
                                         data.rtp_mtu == 0 ? DEFAULT_RTP_MTU : data.rtp_mtu, 
-                                        data.quic_drop_late ? "True" : "False");
+                                        data.quic_drop_late ? "True" : "False",
+                                        data.saveToFilePath != NULL ? data.saveToFilePath : "none",
+                                        data.file_path ? data.file_path : "none");
             if (data.file_path) {
                 /* Print value explanation for server */
                 char *s = (char *) malloc(300);
                 char *s2 = (char *) malloc(200);
                 if (data.udp)
-                    sprintf(s, "#args:time, u-packets-sent, u-bytes-sent");
+                    sprintf(s, "#args:time, u-packets-sent, u-bytes-sent, rtcp-packets-sent, rtcp-bytes-sent");
                 else
-                    sprintf(s, "#args:time, q-packets-sent, q-packets-lost, q-packets-received, q-bytes-sent, q-bytes-received, q-bytes-in-flight, q-srtt, q-cwnd");
+                    sprintf(s, "#args:time, q-packets-sent, q-packets-lost, q-packets-received, q-bytes-sent, q-bytes-sent-media, q-bytes-received, q-bytes-in-flight, q-srtt, q-cwnd");
 
                 if (data.scream)
                     sprintf(s2, ", sc-queue-delay, sc-owd, sc-srtt, sc-cwnd, sc-bytes-in-flight, sc-rate-transmitted, sc-target-bitrate, sc-rtp-rate, sc-rate-lost\n");
@@ -1475,10 +1535,10 @@ int main (int argc, char *argv[])
             } else {
                 /* Print value explanation for client */
                 if (data.udp)
-                    fprintf(data.stat_file_path, "#args:time, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                    fprintf(data.stat_file_path, "#args:time, packets-received, bytes-received-rtp-payload, rtcp-packets-sent, rtcp-bytes-sent, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
                 else
-                    fprintf(data.stat_file_path, "#args:time, packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, "
-                                                 "jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                    fprintf(data.stat_file_path, "#args:time, packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, bytes-received-quic-payload, "
+                                                 "bytes-received-rtp-payload, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
             }
         }
         g_free(logfile);

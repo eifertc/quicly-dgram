@@ -627,6 +627,7 @@ static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink)
       "acks-received", G_TYPE_UINT64, quiclysink->stats.num_packets.acked,
       "bytes-received", G_TYPE_UINT64, quiclysink->stats.num_bytes.received,
       "bytes-sent", G_TYPE_UINT64, quiclysink->stats.num_bytes.sent,
+      "bytes-sent-media", G_TYPE_UINT64, quiclysink->num_bytes,
       "rtt-smoothed", G_TYPE_UINT, quiclysink->stats.rtt.smoothed,
       "rtt-latest", G_TYPE_UINT, quiclysink->stats.rtt.latest,
       "rtt-minimum", G_TYPE_UINT, quiclysink->stats.rtt.minimum,
