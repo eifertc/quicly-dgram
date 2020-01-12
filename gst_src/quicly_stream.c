@@ -1513,7 +1513,7 @@ int main (int argc, char *argv[])
             fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s,rtp-mtu:%i,drop-late:%s,output-file:%s,video:%s\n", 
                                         data.file_path ? "server" : "client", 
                                         data.udp ? "udp" : (data.stream_mode ? "quic-stream" : "quic-dgram"),
-                                        data.scream ? "scream" : (data.quicNoCC ? "none" : "quic"),
+                                        data.scream ? "scream" : data.udp ? "none" : ((data.quicNoCC ? "none" : "quic")),
                                         data.rtp_mtu == 0 ? DEFAULT_RTP_MTU : data.rtp_mtu, 
                                         data.quic_drop_late ? "True" : "False",
                                         data.saveToFilePath != NULL ? data.saveToFilePath : "none",
