@@ -75,7 +75,7 @@ gboolean gst_quiclysink_set_clock(GstElement *element, GstClock *clock);
 static gboolean gst_quiclysink_set_caps (GstBaseSink * sink, GstCaps * caps);
 static gboolean gst_quiclysink_start (GstBaseSink * sink);
 static gboolean gst_quiclysink_stop (GstBaseSink * sink);
-//static gboolean gst_quiclysink_event (GstBaseSink * sink, GstEvent * event);
+static gboolean gst_quiclysink_event (GstBaseSink * sink, GstEvent * event);
 static GstFlowReturn gst_quiclysink_render (GstBaseSink * sink,
     GstBuffer * buffer);
 static GstFlowReturn gst_quiclysink_render_list (GstBaseSink * bsink,
@@ -92,7 +92,7 @@ static int on_stop_sending(quicly_stream_t *stream, int err);
 static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len);
 static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *src, size_t len);
 static int on_receive_reset(quicly_stream_t *stream, int err);
-static int send_pending(GstQuiclysink *quiclysink);
+static int send_pending(GstQuiclysink *quiclysink, guint num);
 static int receive_packet(GstQuiclysink *quiclysink);
 static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len, gint64 max_time);
 static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink);
@@ -156,6 +156,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define DEFAULT_APPLICATION_CC    FALSE
 #define DEFAULT_FEEDBACK          FALSE
 #define DEFAULT_DROP_LATE         FALSE
+#define DEFAULT_SEND_BUFFER       16
 
 /* properties */
 enum
@@ -240,7 +241,7 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
 
   base_sink_class->start = GST_DEBUG_FUNCPTR (gst_quiclysink_start);
   base_sink_class->stop = GST_DEBUG_FUNCPTR (gst_quiclysink_stop);
-  //base_sink_class->event = GST_DEBUG_FUNCPTR (gst_quiclysink_event);
+  base_sink_class->event = GST_DEBUG_FUNCPTR (gst_quiclysink_event);
   
   base_sink_class->set_caps = GST_DEBUG_FUNCPTR (gst_quiclysink_set_caps);
   base_sink_class->render = GST_DEBUG_FUNCPTR (gst_quiclysink_render);
@@ -573,7 +574,7 @@ gst_quiclysink_start (GstBaseSink * sink)
     err = NULL;
     if ((quiclysink->conn != NULL) && 
          (quicly_get_first_timeout(quiclysink->conn) <= quiclysink->ctx.now->cb(quiclysink->ctx.now))) {
-      if (send_pending(quiclysink) != 0) {
+      if (send_pending(quiclysink, DEFAULT_SEND_BUFFER) != 0) {
         quicly_free(quiclysink->conn);
         g_print("Connection closed while sending\n");
         quiclysink->conn = NULL;
@@ -647,16 +648,12 @@ gst_quiclysink_stop (GstBaseSink * sink)
           quiclysink->num_packets, quiclysink->num_bytes / 1000,
           quicly_dgram_debug(quiclysink->dgram));
 
-  g_print("Stop. Num Packets sent: %lu. Kilobytes sent: %lu. Packets left in buffer: %lu\n", 
-          quiclysink->num_packets, quiclysink->num_bytes / 1000,
-          quicly_dgram_debug(quiclysink->dgram));
-
   if (quicly_close(quiclysink->conn, 0, "") != 0)
     g_printerr("Error on close. Unclean shutdown\n");
 
   GIOCondition con;
   do {
-    if (send_pending(quiclysink) != 0) {
+    if (send_pending(quiclysink, DEFAULT_SEND_BUFFER) != 0) {
       g_print("In STOP: sending connection close packet failed\n");
       break;
     }
@@ -744,6 +741,15 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
 
   gst_buffer_map(buffer, &map, GST_MAP_READ);
 
+  /*
+  if (buffer->pts != GST_CLOCK_TIME_NONE) {
+    rtp_hdr *hdr = (rtp_hdr *) map.data;
+    uint32_t time_rtp = hdr->timestamp;
+    g_print("TimeClock: %.3f\n", (gst_clock_get_time(quiclysink->pipeline_clock)
+                                 - GST_ELEMENT(quiclysink)->base_time) / 1e9f);
+    g_print("rtp: %.3f\n", time_rtp / 1e9f);
+  }
+  */
   /* write buffer to quicly dgram buffer */
   if (!quiclysink->stream_mode){
     /* Check if payload size fits in one quicly datagram frame */
@@ -752,11 +758,11 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
       return GST_FLOW_ERROR;
     }
     write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
-                       quiclysink->drop_late ? (quiclysink->ctx.now->cb(quiclysink->ctx.now) + 2) : 0);
+                       quiclysink->drop_late ? (quiclysink->ctx.now->cb(quiclysink->ctx.now) + 3) : 0);
   } else {
     quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);
   }
-  if ((ret = send_pending(quiclysink)) != 0) {
+  if ((ret = send_pending(quiclysink, DEFAULT_SEND_BUFFER)) != 0) {
     g_printerr("Send failed in render\n");
   }
   ++quiclysink->num_packets;
@@ -796,7 +802,7 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
           return GST_FLOW_ERROR;
         }
         write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
-                           quiclysink->drop_late ? (now + 2 + i) : 0);
+                           quiclysink->drop_late ? (now + 3 + i) : 0);
       } else {
         /* TODO: Move rtp framing to quiclysink.c */
         quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);
@@ -808,7 +814,9 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
   }
 
   /* SEND */
-  if ((ret = send_pending(quiclysink)) != 0) {
+  if (num_buffers < DEFAULT_SEND_BUFFER)
+    num_buffers = DEFAULT_SEND_BUFFER;
+  if ((ret = send_pending(quiclysink, num_buffers)) != 0) {
     g_printerr("Send failed in render lists\n");
     flow = GST_FLOW_ERROR;
   } else {
@@ -914,9 +922,9 @@ static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t le
     g_printerr("quicly_dgrambuf_egress_write returns: %i\n", ret);
 }
 
-static int send_pending(GstQuiclysink *quiclysink)
+static int send_pending(GstQuiclysink *quiclysink, guint num)
 {
-  quicly_datagram_t *packets[16];
+  quicly_datagram_t *packets[num];
   size_t num_packets, i;
   gssize rret;
   int ret;
@@ -952,10 +960,8 @@ static int send_pending(GstQuiclysink *quiclysink)
 
   } while ((ret == 0) && 
     (quicly_dgram_can_send(quiclysink->dgram) || 
-    quiclysink->ctx.stream_scheduler->can_send(quiclysink->ctx.stream_scheduler, quiclysink->conn, 0)) && 
-    (num_packets > 0));
-  
-  //g_print("BYTES SEND FROM SOCKET: %lu\n", all);
+    quiclysink->ctx.stream_scheduler->can_send(quiclysink->ctx.stream_scheduler, quiclysink->conn, 0)));
+
   return ret;
 }
 
@@ -989,7 +995,7 @@ static gboolean gst_quiclysink_set_caps (GstBaseSink *sink, GstCaps *caps)
   if (quiclysink->conn != NULL) {
     if (send_caps(quiclysink) == 0) {
       do {
-        ret = send_pending(quiclysink);
+        ret = send_pending(quiclysink, DEFAULT_SEND_BUFFER);
       } while ((ret == 0) && (!quiclysink->received_caps_ack));
       GST_INFO_OBJECT(quiclysink, "Send caps and received ack");
     }
@@ -1153,6 +1159,27 @@ gboolean gst_quiclysink_set_clock(GstElement *element, GstClock *clock)
   }
 
   return GST_ELEMENT_CLASS(gst_quiclysink_parent_class)->set_clock(element, clock);
+}
+
+static void send_remaining_before_close(GstQuiclysink *quiclysink)
+{
+  GST_DEBUG_OBJECT(quiclysink, "Sending final packets\n");
+  g_print("Final_packages\n");
+  while(quicly_dgram_can_send(quiclysink->dgram)) {
+    if (send_pending(quiclysink, DEFAULT_SEND_BUFFER) != 0)
+      break;
+  }
+}
+
+static gboolean gst_quiclysink_event (GstBaseSink * sink, GstEvent * event)
+{
+  switch (GST_EVENT_TYPE(event)) {
+    case GST_EVENT_EOS:
+      send_remaining_before_close(GST_QUICLYSINK(sink));
+    default:
+      return GST_BASE_SINK_CLASS(gst_quiclysink_parent_class)->event(sink, event);
+      //return GST_BASE_SINK_CLASS(sink)->event(sink, event);
+  }
 }
 
 static gboolean

@@ -2253,8 +2253,9 @@ static size_t calc_send_window(quicly_conn_t *conn, size_t min_bytes_to_send, in
     }
 
     /* Validated address. Ensure there's enough window to send minimum number of packets */
-    if (!restrict_sending && conn->egress.cc.cwnd > conn->egress.sentmap.bytes_in_flight + min_bytes_to_send)
+    if (!restrict_sending && conn->egress.cc.cwnd > conn->egress.sentmap.bytes_in_flight + min_bytes_to_send) {
         return conn->egress.cc.cwnd - conn->egress.sentmap.bytes_in_flight;
+    }
     return min_bytes_to_send;
 }
 

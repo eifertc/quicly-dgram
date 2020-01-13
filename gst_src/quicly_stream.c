@@ -11,9 +11,10 @@
 #include <stdio.h>
 #include <gst/rtp/gstrtpbuffer.h>
 #include <gst/rtp/gstrtcpbuffer.h>
+#include <time.h>
 
-#define STAT_TIME_NS 1000000000 /* get stats every second */
-//#define STAT_TIME_NS 500000000 /* get stats every half second */
+//#define DEFAULT_STAT_TIME_NS 1000000000 /* get stats every second */
+#define DEFAULT_STAT_TIME_NS 500000000 /* get stats every half second */
 #define DEFAULT_RTP_MTU 1200
 #define DEFAULT_HOST "127.0.0.1"
 #define DEFAULT_PORT 5000
@@ -25,6 +26,16 @@ int packets_lost = 0;
 int num_buffers = 0;
 guint num_bytes = 0;
 gboolean udp_timeout = FALSE;
+
+/* fps */
+pthread_mutex_t lock_fps;
+gdouble avg_fps_g = 0.0;
+gdouble fps_g = 0.0;
+
+/* udp jitter */
+GstClockTime prev_arrival_time;
+GstClockTime prev_transit;
+guint64 jitter;
 
 typedef struct {
     uint8_t ver_p_x_cc;
@@ -88,9 +99,11 @@ typedef struct _AppData
     gboolean verbose;
     gboolean quicNoCC;
     gboolean quic_drop_late;
+    gboolean async_sink;
     Gst_elements elements;
     Stats stats;
     GstClockTime refTime;
+    gint64 stat_interval;
 } AppData;
 
 typedef struct _SessionData
@@ -139,8 +152,9 @@ inline uint64_t get_time() {
     return t.tv_sec * (int)1e6 + t.tv_usec;
 }
 
-gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer user_data)
+gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer user_data)
 {
+    //clock_t tf = clock();
     AppData *data = (AppData *) user_data;
     GstStructure *stats;
     float time = (gst_clock_get_time(gst_system_clock_obtain()) - data->refTime) / 1.0e9f;
@@ -260,31 +274,43 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
                 gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
                 gst_structure_free(stats);
             }
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu\n", time, packets_received-data->stats.packets_received, 
+            pthread_mutex_lock(&lock_fps);
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%.3f,%.3f\n", 
+                    time, packets_received-data->stats.packets_received, 
                     bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
                     packets_sent-data->stats.packets_sent,
                     bytes_sent-data->stats.bytes_sent,
                     pushed-data->stats.jitbuf_pushed, 
-                    rtp_lost-data->stats.jitbuf_lost, late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
+                    rtp_lost-data->stats.jitbuf_lost, late-data->stats.jitbuf_late, 
+                    jitbuf_jitter, rtpsrc_jitter,
+                    jitter / 1000000, bitrate/1000,
+                    avg_fps_g, fps_g);
+            pthread_mutex_unlock(&lock_fps);
         } else {
             /* quicly */
             g_object_get(data->elements.net, "stats", &stats, NULL);
-            guint64 packets_lost, bytes_received_quic_payload, bytes_received;
+            guint64 packets_lost, bytes_received_quic_payload, bytes_received, jitter;
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
             gst_structure_get_uint64(stats, "packets-lost", &packets_lost);
             gst_structure_get_uint64(stats, "packets-received", &packets_received);
             gst_structure_get_uint64(stats, "bytes-sent", &bytes_sent);
             gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
             gst_structure_get_uint64(stats, "bytes-received-media", &bytes_received_quic_payload);
+            gst_structure_get_uint64(stats, "jitter", &jitter);
             gst_structure_free(stats);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu\n", time,
-                    packets_sent-data->stats.packets_sent, packets_lost-data->stats.packets_lost, 
+            pthread_mutex_lock(&lock_fps);
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%.3f,%.3f\n", 
+                    time, packets_sent-data->stats.packets_sent, 
+                    packets_lost-data->stats.packets_lost, 
                     packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent,
                     bytes_received-data->stats.bytes_received, 
                     bytes_received_quic_payload-data->stats.rtcp_bytes_sent,
                     bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
                     pushed-data->stats.jitbuf_pushed, rtp_lost-data->stats.jitbuf_lost, 
-                    late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, bitrate/1000);
+                    late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, 
+                    jitter / 1000000, bitrate/1000,
+                    avg_fps_g, fps_g);
+            pthread_mutex_unlock(&lock_fps);
 
             data->stats.bytes_sent = bytes_sent;
             data->stats.rtcp_bytes_sent = bytes_received_quic_payload;
@@ -299,17 +325,49 @@ gboolean cb_print_stats(GstClock *clock, GstClockTime t, GstClockID id, gpointer
         data->stats.jitbuf_late = late;
     }
 
+    //g_print("stat timing: %.6f\n", ((double)(clock() - tf)) / CLOCKS_PER_SEC);
     return TRUE;
 }
 
 void create_stat_collection_callback(GstPipeline *pipe, AppData *data)
 {
     GstClock *clock = gst_pipeline_get_clock(pipe);
-    data->elements.clockId = gst_clock_new_periodic_id(clock, gst_clock_get_internal_time(clock), STAT_TIME_NS);
+    gint64 interval;
+    if (data->stat_interval == 0)
+        interval = DEFAULT_STAT_TIME_NS;
+    else 
+        interval = data->stat_interval * 1000000;
+    data->elements.clockId = gst_clock_new_periodic_id(clock, gst_clock_get_internal_time(clock), interval);
     if (!data->elements.clockId)
         g_print("Could not setup periodic clock\n");
     if (gst_clock_id_wait_async(data->elements.clockId, cb_print_stats, data, NULL) != GST_CLOCK_OK)
         g_print("Could not register periodic stats callback");
+}
+
+/* I have to use global variables here, because the signal emmited by fpsvideosink
+ * behaves weird with regards to user data.
+ * TODO: Should look into that. Some strange thread issue.
+ */
+void cb_fps_measurement(GstElement fpsSink, gdouble fps, gdouble droprate, gdouble avg_fps, gpointer user_data)
+{
+    pthread_mutex_lock(&lock_fps);
+    avg_fps_g = avg_fps;
+    fps_g = fps;
+    pthread_mutex_unlock(&lock_fps);
+}
+
+void init_elements(AppData *data)
+{
+    data->elements.net = NULL;
+    data->elements.session = NULL;
+    /*
+    GstElement *jitterbuf;
+    GstElement *scream;
+    GstElement *rtcpSink;
+    GObject *internal_session;
+    GstClockID clockId;
+    GstPipeline *pipeline;
+    */
 }
 
 //static void on_stream_status(GstBus *bus, GstMessage *msg, gpointer user_data)
@@ -469,10 +527,23 @@ cb_state_change(GstBus *bus, GstMessage *msg, gpointer data)
 
 static GstPadProbeReturn cb_udp_first_packet(GstPad *pad, GstPadProbeInfo *info, gpointer data)
 {
-    g_print("Received first packet\n");
-    udp_timeout = TRUE;
+    if (!udp_timeout)
+        udp_timeout = TRUE;
 
-    return GST_PAD_PROBE_REMOVE;
+    /* calc jitter */
+    GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
+    if (prev_arrival_time != 0) {
+      guint64 transit = now - prev_arrival_time;
+      guint64 tmp = prev_transit > transit ? 
+                      prev_transit - transit : 
+                      transit - prev_transit;
+      jitter = jitter + tmp - jitter / 16;
+      prev_transit = transit;
+    }
+    prev_arrival_time = now;
+
+    //return GST_PAD_PROBE_REMOVE;
+    return GST_PAD_PROBE_OK;
 }
 
 /**
@@ -798,13 +869,14 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
     if (sdata->udp) {
         g_print("UDP transport for rtp stream\n");
         rtpSink = gst_element_factory_make("udpsink", "rtpsink");
-        g_object_set (rtpSink, "port", sdata->port, "host", sdata->host, NULL);
+        g_object_set (rtpSink, "port", sdata->port, "host", sdata->host, "sync", !sdata->async_sink, NULL);
     } else {
         g_print("QUIC transport for rtp stream\n");
         rtpSink = gst_element_factory_make("quiclysink", "rtpsink");
         g_object_set(rtpSink, "bind-port", sdata->port, 
                           "cert", sdata->cert_file,
-                          "key", sdata->key_file, NULL);
+                          "key", sdata->key_file, 
+                          "sync", !sdata->async_sink, NULL);
         if (sdata->rtp_mtu != 0)
              g_object_set(rtpSink, "quicly-mtu", sdata->rtp_mtu, NULL);
 
@@ -1186,13 +1258,21 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
     ghostSink = queue;
 
     if (cdata->headless) {
-        sink = gst_element_factory_make("fakesink", "sink");
+        sink = gst_element_factory_make("fpsdisplaysink", "sink");
+        GstElement *internal_sink = gst_element_factory_make("fakesink", "internal_sink");
+        g_object_set(sink, "signal-fps-measurements", TRUE, "video-sink", internal_sink, NULL);
+        g_signal_connect(sink, "fps-measurements", G_CALLBACK(cb_fps_measurement), NULL);
     } else if (cdata->saveToFilePath != NULL) {
         sink = gst_element_factory_make("filesink", "sink");
         g_object_set(sink, "location", cdata->saveToFilePath, NULL);
     } else {
-        sink = gst_element_factory_make("glimagesink", "sink");
-        g_object_set(sink, "sync", FALSE, "async", FALSE, NULL);
+        sink = gst_element_factory_make("fpsdisplaysink", "sink");
+        GstElement *internal_sink;
+        if ((internal_sink = gst_element_factory_make("glimagesink", "internal_sink")) == NULL)
+            internal_sink = gst_element_factory_make("autovideosink", "internal_sink");
+        g_object_set(sink, "signal-fps-measurements", TRUE, "video-sink", internal_sink, NULL);
+        //g_object_set(sink, "sync", FALSE, "async", FALSE, NULL);
+        g_signal_connect(sink, "fps-measurements", G_CALLBACK(cb_fps_measurement), NULL);
     }
 
     if (!bin || !depay || !decoder || !sink || !queue) {
@@ -1344,7 +1424,7 @@ int run_client(AppData *cdata)
     
     rtpBin = gst_element_factory_make("rtpbin", "rtpbin");
     gst_bin_add(GST_BIN(pipe), rtpBin);
-    g_object_set (rtpBin, "latency", 1000, "do-retransmission", cdata->aux,
+    g_object_set (rtpBin, "latency", 200, "do-retransmission", cdata->aux,
       "rtp-profile", GST_RTP_PROFILE_AVPF, NULL);
 
     g_signal_connect(rtpBin, "new-jitterbuffer", G_CALLBACK(cb_new_jitterbuf), cdata);
@@ -1375,7 +1455,7 @@ int run_client(AppData *cdata)
         gst_clock_id_unschedule(cdata->elements.clockId);
         gst_clock_id_unref(cdata->elements.clockId);
     }
-    
+
     if (cdata->verbose)
         print_client_stats(cdata);
 
@@ -1414,11 +1494,15 @@ int main (int argc, char *argv[])
     data.verbose = FALSE;
     data.quicNoCC = FALSE;
     data.saveToFilePath = NULL;
+    data.stat_interval = 0;
+    data.async_sink = FALSE;
     gchar *logfile = NULL;
     GOptionContext *ctx;
     GError *err = NULL;
     gchar **plugins = NULL;
+    init_elements(&data);
     memset(&data.stats, 0, sizeof(Stats));
+    pthread_mutex_init(&lock_fps, NULL);
     
     GOptionEntry entries[] = {
         {"scream", 's', 0, G_OPTION_ARG_NONE, &data.scream,
@@ -1448,6 +1532,8 @@ int main (int argc, char *argv[])
           NULL},
         {"debug", 'd', 0, G_OPTION_ARG_NONE, &data.debug,
          "Print debug info", NULL},
+        {"stat-interval", 'i', 0, G_OPTION_ARG_INT64, &data.stat_interval,
+         "Time between stat collection (in ms). Default: 500", NULL},
         {"disableCC", 'D', 0, G_OPTION_ARG_NONE, &data.quicNoCC,
          "Disable quic CC. Default: False.", NULL},
         {"host", 'h', 0, G_OPTION_ARG_STRING, &data.host,
@@ -1461,9 +1547,11 @@ int main (int argc, char *argv[])
         {"dropLate", 'L', 0, G_OPTION_ARG_NONE, &data.quic_drop_late,
          "Quic. Drop late packets. Default: FALSE", NULL}, 
         {"filesink", 'S', 0, G_OPTION_ARG_STRING, &data.saveToFilePath,
-         "Save video to file", NULL},
+         "Client. Save video to file", NULL},
         {"verbose", 'v', 0, G_OPTION_ARG_NONE, &data.verbose,
          "Print additional information", NULL}, 
+        {"async", 'y', 0, G_OPTION_ARG_NONE, &data.async_sink,
+         "Server. Don't sync on the clock in the sink. Default: False", NULL},
         {NULL}
     };
 
@@ -1539,10 +1627,10 @@ int main (int argc, char *argv[])
             } else {
                 /* Print value explanation for client */
                 if (data.udp)
-                    fprintf(data.stat_file_path, "#args:time, packets-received, bytes-received-rtp-payload, rtcp-packets-sent, rtcp-bytes-sent, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                    fprintf(data.stat_file_path, "#args:time, packets-received, bytes-received-rtp-payload, rtcp-packets-sent, rtcp-bytes-sent, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, src-jitter, rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
                 else
                     fprintf(data.stat_file_path, "#args:time, packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, bytes-received-quic-payload, "
-                                                 "bytes-received-rtp-payload, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, rtpsrc-bitrate(kbit/s)\n");
+                                                 "bytes-received-rtp-payload, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, src-jitter, rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
             }
         }
         g_free(logfile);

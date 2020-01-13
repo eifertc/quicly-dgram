@@ -133,7 +133,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define QUICLY_DEFAULT_MTU    1280
 #define DEFAULT_HOST          "127.0.0.1"
 #define DEFAULT_PORT          5000
-#define MAX_BUFFER_LIST_SIZE  24
+#define MAX_BUFFER_LIST_SIZE  100
 #define SEND_CLOCK_TIME_NS    2000000
 
 enum
@@ -326,6 +326,10 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
   quiclysrc->allocator = NULL;
   gst_allocation_params_init(&quiclysrc->params);
   gst_quiclysrc_realloc_mem_sizes(quiclysrc);
+
+  quiclysrc->jitter = 0;
+  quiclysrc->prev_arrival_time = 0;
+  quiclysrc->prev_transit = 0;
 }
 
 void
@@ -679,9 +683,7 @@ static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc)
   quicly_stats_t stats;
   GST_OBJECT_LOCK(quiclysrc);
   quicly_get_stats(quiclysrc->conn, &stats);
-  GST_OBJECT_UNLOCK(quiclysrc);
   GstStructure *s;
-
   s = gst_structure_new("quiclysrc-stats",
       "packets-received", G_TYPE_UINT64, stats.num_packets.received,
       "packets-sent", G_TYPE_UINT64, stats.num_packets.sent,
@@ -693,8 +695,9 @@ static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc)
       "rtt-smoothed", G_TYPE_UINT, stats.rtt.smoothed,
       "rtt-latest", G_TYPE_UINT, stats.rtt.latest,
       "rtt-minimum", G_TYPE_UINT, stats.rtt.minimum,
-      "rtt-variance", G_TYPE_UINT, stats.rtt.variance, NULL);
-
+      "rtt-variance", G_TYPE_UINT, stats.rtt.variance,
+      "jitter", G_TYPE_UINT64, quiclysrc->jitter, NULL);
+  GST_OBJECT_UNLOCK(quiclysrc);
   return s;
 }
 
@@ -921,9 +924,9 @@ static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
   }
 
   /* receive packets */
-  GIOCondition cond = G_IO_IN | G_IO_PRI;
+  GIOCondition cond = G_IO_IN;
   GIOCondition out_cond;
-  if (!g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN | G_IO_PRI, 6000000, quiclysrc->cancellable, &err)) {
+  if (!g_socket_condition_timed_wait(quiclysrc->socket, G_IO_IN, 6000000, quiclysrc->cancellable, &err)) {
     if (g_error_matches(err, G_IO_ERROR, G_IO_ERROR_BUSY) ||
         g_error_matches(err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
       goto stopped;
@@ -949,16 +952,6 @@ static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
     }
 
   } while ((!quiclysrc->transport_close) && (quiclysrc->pushed < quiclysrc->mem_list_size));
-
-  /* Check if there is something to send */
-  /*
-  if (quicly_get_first_timeout(quiclysrc->conn) <= 
-                  quiclysrc->ctx.now->cb(quiclysrc->ctx.now)) {
-    if (send_pending(quiclysrc) != 0) {
-        g_printerr("Failed to send in create\n");
-    }
-  }
-  */
 
   GstBufferList *buf_list;
   GstBuffer *out_buf = NULL;
@@ -1010,6 +1003,18 @@ static GstFlowReturn gst_quiclysrc_create(GstPushSrc *src, GstBuffer **buf)
 static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len)
 {
   GstQuiclysrc *quiclysrc = GST_QUICLYSRC (*quicly_get_data(dgram->conn));
+
+  /* calc jitter */
+  GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
+  if (quiclysrc->prev_arrival_time != 0) {
+    guint64 transit = now - quiclysrc->prev_arrival_time;
+    guint64 tmp = quiclysrc->prev_transit > transit ? 
+                    quiclysrc->prev_transit - transit : 
+                    transit - quiclysrc->prev_transit;
+    quiclysrc->jitter = quiclysrc->jitter + tmp - quiclysrc->jitter / 16;
+    quiclysrc->prev_transit = transit;
+  }
+  quiclysrc->prev_arrival_time = now;
 
   if (quiclysrc->pushed >= quiclysrc->mem_list_size) {
     quicly_dgrambuf_ingress_receive(dgram, src, len);
@@ -1129,6 +1134,18 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
       return 0;
     }
 
+    /* calc jitter */
+    GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
+    if (quiclysrc->prev_arrival_time != 0) {
+      guint64 transit = now - quiclysrc->prev_arrival_time;
+      guint64 tmp = quiclysrc->prev_transit > transit ? 
+                      quiclysrc->prev_transit - transit : 
+                      transit - quiclysrc->prev_transit;
+      quiclysrc->jitter = quiclysrc->jitter + tmp - quiclysrc->jitter / 16;
+      quiclysrc->prev_transit = transit;
+    }
+    quiclysrc->prev_arrival_time = now;
+
     if (quiclysrc->pushed >= quiclysrc->mem_list_size) {
       /* skip, buffer list full */
       return 0;
@@ -1148,7 +1165,6 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
       }
     } else {
       /* skip, not a complete rtp packet */
-      g_print("RECEIVED. NOT COMPLETE RTP\n");
       return 0;
     }
   }

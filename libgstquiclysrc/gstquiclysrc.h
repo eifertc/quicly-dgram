@@ -98,6 +98,10 @@ struct _GstQuiclysrc
 
   gboolean mem_list_allocated;
   gsize mem_list_size;
+  GstClockTime prev_arrival_time;
+  GstClockTime prev_transit;
+  guint64 jitter;
+
 };
 
 struct _GstQuiclysrcClass
