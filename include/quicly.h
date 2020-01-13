@@ -386,6 +386,7 @@ struct st_quicly_conn_streamgroup_state_t {
         uint64_t sent;                                                                                                             \
         uint64_t lost;                                                                                                             \
         uint64_t acked;                                                                                                            \
+        uint64_t dropped_late;                                                                                                     \
     } num_packets;                                                                                                                 \
     struct {                                                                                                                       \
         uint64_t received;                                                                                                         \

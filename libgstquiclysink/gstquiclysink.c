@@ -634,6 +634,7 @@ static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink)
       "rtt-minimum", G_TYPE_UINT, quiclysink->stats.rtt.minimum,
       "rtt-variance", G_TYPE_UINT, quiclysink->stats.rtt.variance,
       "bytes-in-flight", G_TYPE_UINT64, quiclysink->stats.num_bytes.bytes_in_flight,
+      "dropped-late", G_TYPE_UINT64, quiclysink->stats.num_packets.dropped_late,
       "cwnd", G_TYPE_UINT, quiclysink->stats.cc.cwnd, NULL);
   return s;
 }
@@ -758,7 +759,7 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
       return GST_FLOW_ERROR;
     }
     write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
-                       quiclysink->drop_late ? (quiclysink->ctx.now->cb(quiclysink->ctx.now) + 3) : 0);
+                       quiclysink->drop_late ? (quiclysink->ctx.now->cb(quiclysink->ctx.now) + 2) : 0);
   } else {
     quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);
   }
@@ -802,7 +803,7 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
           return GST_FLOW_ERROR;
         }
         write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
-                           quiclysink->drop_late ? (now + 3 + i) : 0);
+                           quiclysink->drop_late ? (now + 2 + i) : 0);
       } else {
         /* TODO: Move rtp framing to quiclysink.c */
         quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);

@@ -2908,6 +2908,7 @@ int quicly_send_dgram(quicly_conn_t *conn, quicly_send_context_t *s)
     while (quicly_can_send_stream_data(conn, s) && 
            quicly_dgram_can_send(conn->dgram) && ret == 0) {
         if (now > quicly_dgram_get_expire_time(conn->dgram)) {
+            conn->super.stats.num_packets.dropped_late++;
             conn->dgram->callbacks->on_send_shift(conn->dgram, 1);
             continue;
         }

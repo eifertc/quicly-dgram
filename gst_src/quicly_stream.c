@@ -31,6 +31,7 @@ gboolean udp_timeout = FALSE;
 pthread_mutex_t lock_fps;
 gdouble avg_fps_g = 0.0;
 gdouble fps_g = 0.0;
+gdouble frame_drop_rate = 0.0;
 
 /* udp jitter */
 GstClockTime prev_arrival_time;
@@ -56,6 +57,8 @@ typedef struct {
     GstElement *jitterbuf;
     GstElement *scream;
     GstElement *rtcpSink;
+    GstElement *sink;
+    GstElement *internal_sink;
     GObject *internal_session;
     GstClockID clockId;
     GstPipeline *pipeline;
@@ -74,6 +77,7 @@ typedef struct {
     uint64_t rtcp_bytes_sent;
     uint64_t rtcp_packets_sent;
     uint64_t bytes_received_rtp_payload;
+    uint64_t dropped_late;
 } Stats;
 
 typedef struct _AppData
@@ -187,8 +191,8 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
 
         } else {
             guint64 packets_received, packets_lost, 
-                    bytes_received, bytes_in_flight, bytes_sent_media;
-            guint srtt, cwnd;
+                    bytes_received, bytes_in_flight, bytes_sent_media, dropped_late;
+                    guint srtt, cwnd;
             g_object_get(data->elements.net, "stats", &stats, NULL);
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
             gst_structure_get_uint64(stats, "packets-lost", &packets_lost);
@@ -198,16 +202,21 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
             gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
             gst_structure_get_uint64(stats, "bytes-in-flight", &bytes_in_flight);
             gst_structure_get_uint64(stats, "bytes-sent-media", &bytes_sent_media);
+            gst_structure_get_uint64(stats, "dropped-late", &dropped_late);
             gst_structure_get_uint(stats, "rtt-smoothed", &srtt);
             gst_structure_get_uint(stats, "cwnd", &cwnd);
             gst_structure_free(stats);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u", time,
-                    packets_sent-data->stats.packets_sent, packets_lost-data->stats.packets_lost, 
-                    packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent, 
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u", time,
+                    packets_sent-data->stats.packets_sent, 
+                    packets_lost-data->stats.packets_lost, 
+                    packets_received-data->stats.packets_received, 
+                    dropped_late-data->stats.dropped_late,
+                    bytes_sent-data->stats.bytes_sent, 
                     bytes_sent_media-data->stats.rtcp_bytes_sent,
                     bytes_received-data->stats.bytes_received, 
                     bytes_in_flight, srtt, cwnd);
             
+            data->stats.dropped_late = dropped_late;
             data->stats.packets_lost = packets_lost;
             data->stats.packets_received = packets_received;
             data->stats.bytes_received = bytes_received;
@@ -275,7 +284,7 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
                 gst_structure_free(stats);
             }
             pthread_mutex_lock(&lock_fps);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%.3f,%.3f\n", 
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%.2f,%.2f\n", 
                     time, packets_received-data->stats.packets_received, 
                     bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
                     packets_sent-data->stats.packets_sent,
@@ -299,10 +308,11 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
             gst_structure_get_uint64(stats, "jitter", &jitter);
             gst_structure_free(stats);
             pthread_mutex_lock(&lock_fps);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%.3f,%.3f\n", 
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%.2f,%.2f\n", 
                     time, packets_sent-data->stats.packets_sent, 
                     packets_lost-data->stats.packets_lost, 
-                    packets_received-data->stats.packets_received, bytes_sent-data->stats.bytes_sent,
+                    packets_received-data->stats.packets_received, 
+                    bytes_sent-data->stats.bytes_sent,
                     bytes_received-data->stats.bytes_received, 
                     bytes_received_quic_payload-data->stats.rtcp_bytes_sent,
                     bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
@@ -311,7 +321,6 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
                     jitter / 1000000, bitrate/1000,
                     avg_fps_g, fps_g);
             pthread_mutex_unlock(&lock_fps);
-
             data->stats.bytes_sent = bytes_sent;
             data->stats.rtcp_bytes_sent = bytes_received_quic_payload;
             data->stats.bytes_received = bytes_received;
@@ -353,6 +362,7 @@ void cb_fps_measurement(GstElement fpsSink, gdouble fps, gdouble droprate, gdoub
     pthread_mutex_lock(&lock_fps);
     avg_fps_g = avg_fps;
     fps_g = fps;
+    frame_drop_rate = droprate;
     pthread_mutex_unlock(&lock_fps);
 }
 
@@ -360,6 +370,7 @@ void init_elements(AppData *data)
 {
     data->elements.net = NULL;
     data->elements.session = NULL;
+    data->elements.sink = NULL;
     /*
     GstElement *jitterbuf;
     GstElement *scream;
@@ -1260,8 +1271,11 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
     if (cdata->headless) {
         sink = gst_element_factory_make("fpsdisplaysink", "sink");
         GstElement *internal_sink = gst_element_factory_make("fakesink", "internal_sink");
-        g_object_set(sink, "signal-fps-measurements", TRUE, "video-sink", internal_sink, NULL);
+        g_object_set(internal_sink, "sync", TRUE, "qos", TRUE, NULL);
+        g_object_set(sink, "signal-fps-measurements", TRUE, "video-sink", internal_sink, 
+                    "sync", TRUE, NULL);
         g_signal_connect(sink, "fps-measurements", G_CALLBACK(cb_fps_measurement), NULL);
+        cdata->elements.internal_sink = internal_sink;
     } else if (cdata->saveToFilePath != NULL) {
         sink = gst_element_factory_make("filesink", "sink");
         g_object_set(sink, "location", cdata->saveToFilePath, NULL);
@@ -1273,7 +1287,9 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
         g_object_set(sink, "signal-fps-measurements", TRUE, "video-sink", internal_sink, NULL);
         //g_object_set(sink, "sync", FALSE, "async", FALSE, NULL);
         g_signal_connect(sink, "fps-measurements", G_CALLBACK(cb_fps_measurement), NULL);
+        cdata->elements.internal_sink = internal_sink;
     }
+    cdata->elements.sink = sink;
 
     if (!bin || !depay || !decoder || !sink || !queue) {
         g_printerr ("One element could not be created. Exiting.\n");
@@ -1611,12 +1627,16 @@ int main (int argc, char *argv[])
                 char *s = (char *) malloc(300);
                 char *s2 = (char *) malloc(200);
                 if (data.udp)
-                    sprintf(s, "#args:time, u-packets-sent, u-bytes-sent, rtcp-packets-sent, rtcp-bytes-sent");
+                    sprintf(s, "#args:time, u-packets-sent, u-bytes-sent, rtcp-packets-sent, "
+                                "rtcp-bytes-sent");
                 else
-                    sprintf(s, "#args:time, q-packets-sent, q-packets-lost, q-packets-received, q-bytes-sent, q-bytes-sent-media, q-bytes-received, q-bytes-in-flight, q-srtt, q-cwnd");
+                    sprintf(s, "#args:time, q-packets-sent, q-packets-lost, q-packets-received, "
+                                "packets-dropped-late, q-bytes-sent, q-bytes-sent-media, q-bytes-received, "
+                                "q-bytes-in-flight, q-srtt, q-cwnd");
 
                 if (data.scream)
-                    sprintf(s2, ", sc-queue-delay, sc-owd, sc-srtt, sc-cwnd, sc-bytes-in-flight, sc-rate-transmitted, sc-target-bitrate, sc-rtp-rate, sc-rate-lost\n");
+                    sprintf(s2, ", sc-queue-delay, sc-owd, sc-srtt, sc-cwnd, sc-bytes-in-flight, "
+                                "sc-rate-transmitted, sc-target-bitrate, sc-rtp-rate, sc-rate-lost\n");
                 else
                     sprintf(s2, "\n");
 
@@ -1627,10 +1647,14 @@ int main (int argc, char *argv[])
             } else {
                 /* Print value explanation for client */
                 if (data.udp)
-                    fprintf(data.stat_file_path, "#args:time, packets-received, bytes-received-rtp-payload, rtcp-packets-sent, rtcp-bytes-sent, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, src-jitter, rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
+                    fprintf(data.stat_file_path, "#args:time, packets-received, bytes-received-rtp-payload, "
+                                                 "rtcp-packets-sent, rtcp-bytes-sent, jitbuf-pushed, jitbuf_lost, "
+                                                 "jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, src-jitter, "
+                                                 "rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
                 else
                     fprintf(data.stat_file_path, "#args:time, packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, bytes-received-quic-payload, "
-                                                 "bytes-received-rtp-payload, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, src-jitter, rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
+                                                 "bytes-received-rtp-payload, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, src-jitter, "
+                                                 "rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
             }
         }
         g_free(logfile);
