@@ -1624,8 +1624,8 @@ int main (int argc, char *argv[])
                                         data.file_path ? data.file_path : "none");
             if (data.file_path) {
                 /* Print value explanation for server */
-                char *s = (char *) malloc(300);
-                char *s2 = (char *) malloc(200);
+                char *s = (char *) malloc(500);
+                char *s2 = (char *) malloc(500);
                 if (data.udp)
                     sprintf(s, "#args:time, u-packets-sent, u-bytes-sent, rtcp-packets-sent, "
                                 "rtcp-bytes-sent");

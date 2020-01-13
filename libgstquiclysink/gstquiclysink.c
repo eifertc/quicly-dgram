@@ -1170,7 +1170,6 @@ gboolean gst_quiclysink_set_clock(GstElement *element, GstClock *clock)
 static void send_remaining_before_close(GstQuiclysink *quiclysink)
 {
   GST_DEBUG_OBJECT(quiclysink, "Sending final packets\n");
-  g_print("Final_packages\n");
   while(quicly_dgram_can_send(quiclysink->dgram)) {
     if (send_pending(quiclysink, DEFAULT_SEND_BUFFER) != 0)
       break;
