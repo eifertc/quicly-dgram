@@ -19,14 +19,19 @@
 /**
  * SECTION:element-gstquiclysink
  *
- * The quiclysink element does FIXME stuff.
+ * The quiclysink element is a server sink using the quic protocol
+ * over the underlying modified quicly implementation.
+ * Quicly is modified to support unreliable datagrams according to
+ * "https://tools.ietf.org/html/draft-pauly-quic-datagram-05"
+ * It supports both regular quic streams and unreliable datagrams
  *
  * <refsect2>
  * <title>Example launch line</title>
  * |[
- * gst-launch -v fakesrc ! quiclysink ! FIXME ! fakesink
+ * gst-launch -v fakesrc ! quiclysink cert=Path-to-certificate key=Path-to-key
  * ]|
- * FIXME Describe what the pipeline does.
+ * Creates a server pipeline to connect to. There is no certificate validation
+ *
  * </refsect2>
  */
 
@@ -803,7 +808,7 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
           return GST_FLOW_ERROR;
         }
         write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
-                           quiclysink->drop_late ? (now + 2 + i) : 0);
+                           quiclysink->drop_late ? (now + 2 * i) : 0);
       } else {
         /* TODO: Move rtp framing to quiclysink.c */
         quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);
