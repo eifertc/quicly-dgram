@@ -144,8 +144,6 @@ enum
   PROP_HOST,
   PROP_PORT,
   PROP_CAPS,
-  PROP_DEFAULT_BUFFER_SIZE,
-  PROP_UDP_MTU,
   PROP_QUICLY_MTU,
   PROP_STATS
 };
@@ -198,8 +196,8 @@ gst_quiclysrc_class_init (GstQuiclysrcClass * klass)
       gst_static_pad_template_get (&gst_quiclysrc_src_template));
 
   gst_element_class_set_static_metadata (GST_ELEMENT_CLASS(klass),
-      "FIXME Long name", "Generic", "FIXME Description",
-      "FIXME <fixme@example.com>");
+      "Quic client source plugin", "Source/Network", "Connects to a quic server and receives packets",
+      "Christoph Eifert <christoph.eifert@tum.de>");
 
   gobject_class->set_property = gst_quiclysrc_set_property;
   gobject_class->get_property = gst_quiclysrc_get_property;
@@ -242,18 +240,7 @@ gst_quiclysrc_class_init (GstQuiclysrcClass * klass)
                                    g_param_spec_boxed ("caps", "Caps",
                                    "The caps of the source pad", GST_TYPE_CAPS,
                                    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-  g_object_class_install_property (G_OBJECT_CLASS (klass), PROP_DEFAULT_BUFFER_SIZE,
-                                   g_param_spec_int ("buffer-size", "Buffer Size",
-                                   "Size of the kernel receive buffer in bytes, 0=default", 
-                                   0, G_MAXINT,
-                                   DEFAULT_BUFFER_SIZE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
-  g_object_class_install_property (gobject_class, PROP_UDP_MTU,
-          g_param_spec_uint ("udp-mtu", "Expected Maximum Transmission Unit",
-          "Maximum expected packet size. This directly defines the allocation"
-          "size of the receive buffer pool.",
-          0, G_MAXINT, UDP_DEFAULT_MTU,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_QUICLY_MTU,
           g_param_spec_uint ("quicly-mtu", "Expected Max Quicly packet size",
           "Maximum expected packet size of quicly packets.",
@@ -278,7 +265,7 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
 
   gst_base_src_set_live(GST_BASE_SRC(quiclysrc), TRUE);
   gst_base_src_set_format (GST_BASE_SRC (quiclysrc), GST_FORMAT_TIME);
-  //gst_base_src_set_do_timestamp (GST_BASE_SRC (quiclysrc), TRUE);
+  gst_base_src_set_do_timestamp (GST_BASE_SRC (quiclysrc), TRUE);
 
   quiclysrc->udp_mtu = UDP_DEFAULT_MTU;
   quiclysrc->quicly_mtu = QUICLY_DEFAULT_MTU;
@@ -401,6 +388,26 @@ gst_quiclysrc_get_property (GObject * object, guint property_id,
   GST_DEBUG_OBJECT (quiclysrc, "get_property");
 
   switch (property_id) {
+    case PROP_BIND_ADDRESS:
+      g_value_set_string(value, quiclysrc->bind_addr);
+      break;
+    case PROP_HOST:
+      g_value_set_string(value, quiclysrc->host);
+      break;
+    case PROP_PORT:
+      g_value_set_int(value, quiclysrc->port);
+      break;
+    case PROP_BIND_PORT:
+      g_value_set_int(value, quiclysrc->bind_port);
+      break;
+    case PROP_QUICLY_MTU:
+      g_value_set_uint(value, quiclysrc->quicly_mtu);
+      break;
+    case PROP_CAPS:
+      GST_OBJECT_LOCK(quiclysrc);
+      gst_value_set_caps(value, quiclysrc->caps);
+      GST_OBJECT_UNLOCK(quiclysrc);
+      break;
     case PROP_STATS:
       g_value_take_boxed(value, gst_quiclysrc_create_stats(quiclysrc));
       break;

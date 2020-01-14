@@ -190,13 +190,13 @@ inline size_t quicly_dgram_can_get_data(quicly_dgram_t *dgram)
 inline int64_t quicly_dgram_get_expire_time(quicly_dgram_t *dgram)
 {
     if (dgram == NULL)
-        return -1;
+        return INT64_MAX;
 
     quicly_dgrambuf_t *bf = (quicly_dgrambuf_t *)dgram->data;
     if (bf->egress.vecs.size > 0) {
         return bf->egress.vecs.entries[0].max_time;
     } else {
-        return -1;
+        return INT64_MAX;
     }
 }
 

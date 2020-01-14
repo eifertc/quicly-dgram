@@ -160,7 +160,7 @@ static const quicly_dgram_callbacks_t dgram_callbacks = {quicly_dgrambuf_destroy
 #define FEEDBACK_TIME_INTERVAL_NS 20000000
 #define DEFAULT_APPLICATION_CC    FALSE
 #define DEFAULT_FEEDBACK          FALSE
-#define DEFAULT_DROP_LATE         FALSE
+#define DEFAULT_DROP_LATE         -1
 #define DEFAULT_SEND_BUFFER       16
 
 /* properties */
@@ -220,8 +220,8 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
       gst_static_pad_template_get (&gst_quiclysink_sink_template));
 
   gst_element_class_set_static_metadata (GST_ELEMENT_CLASS(klass),
-      "FIXME Long name", "Generic", "FIXME Description",
-      "FIXME <fixme@example.com>");
+      "Quic dgram server", "Sink/Network", "Send data over the network via quic",
+      "Christoph Eifert <christoph.eifert@tum.de>");
 
   /**
    * GstQuiclysink::on-feedback-report
@@ -254,8 +254,12 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
 
   gstelement_class->set_clock = GST_DEBUG_FUNCPTR(gst_quiclysink_set_clock);
 
-  g_object_class_install_property(gobject_class, PROP_BIND_ADDRESS, g_param_spec_string("bind-addr", "BindAddr", "the host address to bind", UDP_DEFAULT_BIND_ADDRESS, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-  g_object_class_install_property(gobject_class, PROP_BIND_PORT, g_param_spec_int("bind-port", "BindPort", "the port to bind", 1, 65535, UDP_DEFAULT_BIND_PORT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property(gobject_class, PROP_BIND_ADDRESS, 
+                  g_param_spec_string("bind-addr", "BindAddr", "the host address to bind", 
+                  UDP_DEFAULT_BIND_ADDRESS, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property(gobject_class, PROP_BIND_PORT, 
+                  g_param_spec_int("bind-port", "BindPort", "the port to bind", 1, 65535, 
+                  UDP_DEFAULT_BIND_PORT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property(gobject_class, PROP_CERTIFICATE, 
                                   g_param_spec_string("cert", "Server Cert",
@@ -264,7 +268,7 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
   g_object_class_install_property(gobject_class, PROP_PRIVATE_KEY, 
                                   g_param_spec_string("key", "Server Key",
                                   "The server private key file",
-                                  DEFAULT_PRIVATE_KEY, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+                                  DEFAULT_PRIVATE_KEY, G_PARAM_WRITABLE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class, PROP_QUICLY_MTU,
                                   g_param_spec_uint ("quicly-mtu", "Quicly Maximum Transmission Unit",
@@ -292,8 +296,9 @@ gst_quiclysink_class_init (GstQuiclysinkClass * klass)
                                 g_param_spec_boolean("feedback", "FeedbackData", "Send feedback signal",
                                 DEFAULT_FEEDBACK, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property(gobject_class, PROP_DROP_LATE,
-                                g_param_spec_boolean("drop-late", "DropLate", "Drop late packets. NOT USEABLE",
-                                DEFAULT_FEEDBACK, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+                                g_param_spec_int("drop-late", "DropLate", "Drop late packets. 0: Drop immediatly, -1: Never (Default)",
+                                -1, 65535, DEFAULT_DROP_LATE,
+                                G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
@@ -423,7 +428,7 @@ gst_quiclysink_set_property (GObject * object, guint property_id,
       quiclysink->feedback_active = g_value_get_boolean(value);
       break;
     case PROP_DROP_LATE:
-      quiclysink->drop_late = g_value_get_boolean(value);
+      quiclysink->drop_late = g_value_get_int(value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -445,6 +450,34 @@ gst_quiclysink_get_property (GObject * object, guint property_id,
       break;
     case PROP_AUTO_CAPS_EXCHANGE:
       g_value_set_boolean(value, quiclysink->auto_caps_exchange);
+      break;
+    case PROP_DROP_LATE:
+      g_value_set_int(value, quiclysink->drop_late);
+      break;
+    case PROP_MULTI_STREAM_MODE:
+      g_value_set_boolean(value, quiclysink->multi_stream_mode);
+      break;
+    case PROP_APPLICATION_CC:
+      g_value_set_boolean(value, quiclysink->application_cc);
+      break;
+    case PROP_FEEDBACK:
+      g_value_set_boolean(value, quiclysink->feedback_active);
+      break;
+    case PROP_STREAM_MODE:
+      g_value_set_boolean(value, quiclysink->stream_mode);
+      break;
+    case PROP_BIND_PORT:
+      g_value_set_int(value, quiclysink->bind_port);
+      break;
+    case PROP_BIND_ADDRESS:
+      g_value_set_string(value, quiclysink->bind_iaddr);
+      break;
+    case PROP_QUICLY_MTU:
+      g_value_set_uint(value, quiclysink->quicly_mtu);
+      break;
+    case PROP_CERTIFICATE:
+      g_value_set_string(value, quiclysink->cert);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
       break;
@@ -764,7 +797,7 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
       return GST_FLOW_ERROR;
     }
     write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
-                       quiclysink->drop_late ? (quiclysink->ctx.now->cb(quiclysink->ctx.now) + 2) : 0);
+                       quiclysink->drop_late > 0 ? (quiclysink->ctx.now->cb(quiclysink->ctx.now) + 2) : quiclysink->drop_late);
   } else {
     quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);
   }
@@ -808,7 +841,7 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
           return GST_FLOW_ERROR;
         }
         write_dgram_buffer(quiclysink->dgram, map.data, map.size, 
-                           quiclysink->drop_late ? (now + 2 * i) : 0);
+                           quiclysink->drop_late > 0 ? (now + 2 * i) : quiclysink->drop_late);
       } else {
         /* TODO: Move rtp framing to quiclysink.c */
         quicly_streambuf_egress_write_rtp_framing(quiclysink->stream, map.data, map.size);
@@ -1202,21 +1235,21 @@ plugin_init (GstPlugin * plugin)
    remove these, as they're always defined.  Otherwise, edit as
    appropriate for your external plugin package. */
 #ifndef VERSION
-#define VERSION "0.0.FIXME"
+#define VERSION "0.1"
 #endif
 #ifndef PACKAGE
-#define PACKAGE "FIXME_package"
+#define PACKAGE "quicly-dgram"
 #endif
 #ifndef PACKAGE_NAME
-#define PACKAGE_NAME "FIXME_package_name"
+#define PACKAGE_NAME "none"
 #endif
 #ifndef GST_PACKAGE_ORIGIN
-#define GST_PACKAGE_ORIGIN "http://FIXME.org/"
+#define GST_PACKAGE_ORIGIN "https://github.com/Banaschar/quicly-dgram"
 #endif
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
     GST_VERSION_MINOR,
     quiclysink,
-    "FIXME plugin description",
+    "Quic server plugin",
     plugin_init, VERSION, "LGPL", PACKAGE_NAME, GST_PACKAGE_ORIGIN)
 

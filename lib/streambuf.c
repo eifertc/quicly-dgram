@@ -291,7 +291,7 @@ int quicly_dgrambuf_egress_write(quicly_dgram_t *dgram, const void *src, size_t 
 
 int quicly_dgrambuf_write(quicly_dgram_t *dgram, quicly_dgram_listbuf_t *buf, const void *src, size_t len, int64_t max_time)
 {
-    quicly_dgram_listbuf_vec_t vec = {max_time==0 ? INT64_MAX : max_time, len, NULL};
+    quicly_dgram_listbuf_vec_t vec = {max_time==-1 ? INT64_MAX : max_time, len, NULL};
     int ret;
 
     if ((vec.data = malloc(len)) == NULL) {

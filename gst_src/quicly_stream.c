@@ -102,7 +102,7 @@ typedef struct _AppData
     gboolean camera;
     gboolean verbose;
     gboolean quicNoCC;
-    gboolean quic_drop_late;
+    gint quic_drop_late;
     gboolean async_sink;
     Gst_elements elements;
     Stats stats;
@@ -321,10 +321,10 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
                     jitter / 1000000, bitrate/1000,
                     avg_fps_g, fps_g);
             pthread_mutex_unlock(&lock_fps);
-            data->stats.bytes_sent = bytes_sent;
             data->stats.rtcp_bytes_sent = bytes_received_quic_payload;
             data->stats.bytes_received = bytes_received;
         }
+        data->stats.bytes_sent = bytes_sent;
         data->stats.bytes_received_rtp_payload = bytes_received_rtp_payload;
         data->stats.packets_lost = packets_lost;
         data->stats.packets_sent = packets_sent;
@@ -904,7 +904,7 @@ static void add_server_stream(GstPipeline *pipe, GstElement *rtpBin, SessionData
             g_signal_connect(rtpSink, "on-feedback-report", G_CALLBACK(cb_on_feedback_report), NULL);
         }
 
-        if (sdata->quic_drop_late)
+        if (sdata->quic_drop_late != -1)
             g_object_set(rtpSink, "drop-late", TRUE, NULL);
     }
     sdata->elements.net = rtpSink;
@@ -1284,8 +1284,11 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
         GstElement *internal_sink;
         if ((internal_sink = gst_element_factory_make("glimagesink", "internal_sink")) == NULL)
             internal_sink = gst_element_factory_make("autovideosink", "internal_sink");
+
+        //g_object_set(internal_sink, "sync", FALSE, "async", FALSE, NULL);
+        //g_object_set(sink, "sync", TRUE, NULL);
         g_object_set(sink, "signal-fps-measurements", TRUE, "video-sink", internal_sink, NULL);
-        //g_object_set(sink, "sync", FALSE, "async", FALSE, NULL);
+        
         g_signal_connect(sink, "fps-measurements", G_CALLBACK(cb_fps_measurement), NULL);
         cdata->elements.internal_sink = internal_sink;
     }
@@ -1466,6 +1469,9 @@ int run_client(AppData *cdata)
 
     g_main_loop_run(loop);
 
+    // print graph
+    //GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipe), GST_DEBUG_GRAPH_SHOW_ALL, "mainPipeline");
+
     /* Out of the main loop */
     if (cdata->stat_file_path) {
         gst_clock_id_unschedule(cdata->elements.clockId);
@@ -1501,7 +1507,7 @@ int main (int argc, char *argv[])
     data.aux = FALSE;
     data.scream = FALSE;
     data.camera = FALSE;
-    data.quic_drop_late = FALSE;
+    data.quic_drop_late = -1;
     data.file_path = NULL;
     data.cert_file = NULL;
     data.key_file = NULL;;
@@ -1560,8 +1566,8 @@ int main (int argc, char *argv[])
          "Client. Use fakesink", NULL},
         {"logfile", 'l', 0, G_OPTION_ARG_STRING, &logfile,
          "Log stats. Filepath or stdout", NULL}, 
-        {"dropLate", 'L', 0, G_OPTION_ARG_NONE, &data.quic_drop_late,
-         "Quic. Drop late packets. Default: FALSE", NULL}, 
+        {"dropLate", 'L', 0, G_OPTION_ARG_INT, &data.quic_drop_late,
+         "Quic. Drop late packets. -1: Never, 0: Drop immediately if can't send, >0: use expiration time", NULL}, 
         {"filesink", 'S', 0, G_OPTION_ARG_STRING, &data.saveToFilePath,
          "Client. Save video to file", NULL},
         {"verbose", 'v', 0, G_OPTION_ARG_NONE, &data.verbose,
@@ -1614,12 +1620,12 @@ int main (int argc, char *argv[])
                 return -1;
             }
             /* Print application info */
-            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s,rtp-mtu:%i,drop-late:%s,output-file:%s,video:%s\n", 
+            fprintf(data.stat_file_path, "#app:%s,transport:%s,cc:%s,rtp-mtu:%i,drop-late:%i,output-file:%s,video:%s\n", 
                                         data.file_path ? "server" : "client", 
                                         data.udp ? "udp" : (data.stream_mode ? "quic-stream" : "quic-dgram"),
                                         data.scream ? "scream" : data.udp ? "none" : ((data.quicNoCC ? "none" : "quic")),
                                         data.rtp_mtu == 0 ? DEFAULT_RTP_MTU : data.rtp_mtu, 
-                                        data.quic_drop_late ? "True" : "False",
+                                        data.quic_drop_late,
                                         data.saveToFilePath != NULL ? data.saveToFilePath : "none",
                                         data.file_path ? data.file_path : "none");
             if (data.file_path) {

@@ -90,7 +90,7 @@ struct _GstQuiclysink
   gboolean feedback_active;
   GstClock *pipeline_clock;
   GstClockTime previousPts;
-  gboolean drop_late;
+  gint drop_late;
 };
 
 struct _GstQuiclysinkClass

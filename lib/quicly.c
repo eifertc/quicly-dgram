@@ -2272,6 +2272,11 @@ int64_t quicly_get_first_timeout(quicly_conn_t *conn)
         return conn->idle_timeout.at;
     }
 
+    if (now > quicly_dgram_get_expire_time(conn->dgram)) {
+            conn->super.stats.num_packets.dropped_late++;
+            conn->dgram->callbacks->on_send_shift(conn->dgram, 1);
+    }
+
     int64_t at = conn->egress.loss.alarm_at;
     if (conn->egress.send_ack_at < at)
         at = conn->egress.send_ack_at;
