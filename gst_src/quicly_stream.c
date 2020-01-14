@@ -38,6 +38,7 @@ GstClockTime prev_arrival_time = 0;
 GstClockTime prev_transit = 0;
 guint64 jitter = 0;
 guint udp_num_packets = 0;
+guint num_jitter_spikes = 0;
 
 typedef struct {
     uint8_t ver_p_x_cc;
@@ -79,6 +80,7 @@ typedef struct {
     uint64_t rtcp_packets_sent;
     uint64_t bytes_received_rtp_payload;
     uint64_t dropped_late;
+    uint32_t num_jit_spikes;
 } Stats;
 
 typedef struct _AppData
@@ -285,7 +287,7 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
                 gst_structure_free(stats);
             }
             pthread_mutex_lock(&lock_fps);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%.2f,%.2f\n", 
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%u,%lu,%.2f,%.2f\n", 
                     time, packets_received-data->stats.packets_received, 
                     bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
                     packets_sent-data->stats.packets_sent,
@@ -293,11 +295,14 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
                     pushed-data->stats.jitbuf_pushed, 
                     rtp_lost-data->stats.jitbuf_lost, late-data->stats.jitbuf_late, 
                     jitbuf_jitter, rtpsrc_jitter,
-                    jitter / 1000000, bitrate/1000,
+                    jitter, num_jitter_spikes-data->stats.num_jit_spikes,
+                    bitrate/1000,
                     avg_fps_g, fps_g);
+            data->stats.num_jit_spikes = num_jitter_spikes;
             pthread_mutex_unlock(&lock_fps);
         } else {
             /* quicly */
+            guint jit_spikes = 0;
             g_object_get(data->elements.net, "stats", &stats, NULL);
             guint64 packets_lost, bytes_received_quic_payload, bytes_received, jitter;
             gst_structure_get_uint64(stats, "packets-sent", &packets_sent);
@@ -307,9 +312,10 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
             gst_structure_get_uint64(stats, "bytes-received", &bytes_received);
             gst_structure_get_uint64(stats, "bytes-received-media", &bytes_received_quic_payload);
             gst_structure_get_uint64(stats, "jitter", &jitter);
+            gst_structure_get_uint(stats, "jitter-spikes", &jit_spikes);
             gst_structure_free(stats);
             pthread_mutex_lock(&lock_fps);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%.2f,%.2f\n", 
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%u,%lu%.2f,%.2f\n", 
                     time, packets_sent-data->stats.packets_sent, 
                     packets_lost-data->stats.packets_lost, 
                     packets_received-data->stats.packets_received, 
@@ -319,9 +325,11 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
                     bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
                     pushed-data->stats.jitbuf_pushed, rtp_lost-data->stats.jitbuf_lost, 
                     late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, 
-                    jitter / 1000000, bitrate/1000,
+                    jitter, jit_spikes-data->stats.num_jit_spikes,
+                    bitrate/1000,
                     avg_fps_g, fps_g);
             pthread_mutex_unlock(&lock_fps);
+            data->stats.num_jit_spikes = jit_spikes;
             data->stats.rtcp_bytes_sent = bytes_received_quic_payload;
             data->stats.bytes_received = bytes_received;
         }
@@ -549,6 +557,8 @@ static GstPadProbeReturn cb_udp_first_packet(GstPad *pad, GstPadProbeInfo *info,
       guint32 tmp = prev_transit > transit ? 
                       prev_transit - transit : 
                       transit - prev_transit;
+      if (tmp > 2 * jitter)
+        num_jitter_spikes++;
       jitter = (udp_num_packets * jitter + tmp) / (udp_num_packets + 1);
       prev_transit = transit;
     }
@@ -982,7 +992,7 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
         return NULL;
     }
 
-    g_object_set(identity, "sync", TRUE, NULL);
+    g_object_set(identity, "sync", FALSE, NULL);
     g_object_set(G_OBJECT(filesrc), "location", sdata->file_path, NULL);
     if (sdata->rtp_mtu > 1252)
         sdata->rtp_mtu = 1252;
@@ -996,7 +1006,7 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
         //GstElement *queue = gst_element_factory_make("queue", "decode_queue");
         GstElement *encoder = gst_element_factory_make("x264enc", "video");
         /* TODO: add bitrate option */
-        g_object_set(encoder, "bitrate", 2000, "tune", 4, NULL);
+        g_object_set(encoder,"tune", 4, NULL);
 
         if (sdata->scream) {
             GstElement *scream = gst_element_factory_make("gscreamtx", "scream");
@@ -1013,6 +1023,7 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
             lastEle = scream;
         } else {
             /* Transcode only */
+            g_object_set(encoder, "bitrate", 5000, NULL);
             gst_bin_add_many (videoBin, filesrc, demux, decoder, identity,
                               queue2_1, queue2_2, encoder, rtph264pay, NULL);
             gst_element_link_many(decoder, identity, queue2_1, encoder, queue2_2, rtph264pay, NULL);
@@ -1401,7 +1412,7 @@ void print_client_stats(AppData *cdata)
         g_value_array_free(arr);
         #pragma GCC diagnostic pop
     }
-    g_print("SRC AVERAGE JITTER: %lu\n", jitter);
+    g_print("Src avg jitter: %lu, Num. jitter spikes: %u, num_packets: %u\n", jitter, num_jitter_spikes, udp_num_packets);
 
     if(!cdata->udp) {
         g_object_get(gst_bin_get_by_name(GST_BIN(cdata->elements.pipeline), "rtpsrc"), "stats", &stats, NULL);
@@ -1659,11 +1670,11 @@ int main (int argc, char *argv[])
                     fprintf(data.stat_file_path, "#args:time, packets-received, bytes-received-rtp-payload, "
                                                  "rtcp-packets-sent, rtcp-bytes-sent, jitbuf-pushed, jitbuf_lost, "
                                                  "jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, src-jitter, "
-                                                 "rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
+                                                 "jitter-spikes, rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
                 else
                     fprintf(data.stat_file_path, "#args:time, packets-sent, packets-lost, packets-received, bytes-sent, bytes-received, bytes-received-quic-payload, "
                                                  "bytes-received-rtp-payload, jitbuf-pushed, jitbuf_lost, jitbuf_late, jitbuf-jitter(ns), rtpsrc-jitter, src-jitter, "
-                                                 "rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
+                                                 "jitter-spikes, rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
             }
         }
         g_free(logfile);

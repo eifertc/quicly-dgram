@@ -317,6 +317,8 @@ gst_quiclysrc_init (GstQuiclysrc *quiclysrc)
   quiclysrc->jitter = 0;
   quiclysrc->prev_arrival_time = 0;
   quiclysrc->prev_transit = 0;
+  quiclysrc->max_jitter = 0;
+  quiclysrc->num_jitter_spikes = 0;
 }
 
 void
@@ -703,7 +705,8 @@ static GstStructure *gst_quiclysrc_create_stats(GstQuiclysrc *quiclysrc)
       "rtt-latest", G_TYPE_UINT, stats.rtt.latest,
       "rtt-minimum", G_TYPE_UINT, stats.rtt.minimum,
       "rtt-variance", G_TYPE_UINT, stats.rtt.variance,
-      "jitter", G_TYPE_UINT64, quiclysrc->jitter, NULL);
+      "jitter", G_TYPE_UINT64, quiclysrc->jitter, 
+      "jitter-spikes", G_TYPE_UINT, quiclysrc->num_jitter_spikes, NULL);
   GST_OBJECT_UNLOCK(quiclysrc);
   return s;
 }
@@ -1019,6 +1022,8 @@ static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len)
                     quiclysrc->prev_transit - transit : 
                     transit - quiclysrc->prev_transit;
 
+    if (tmp > 2 * quiclysrc->jitter)
+      quiclysrc->num_jitter_spikes++;
     quiclysrc->jitter = (quiclysrc->num_packets * quiclysrc->jitter + tmp) / (quiclysrc->num_packets + 1);
     quiclysrc->prev_transit = transit;
   }
@@ -1150,6 +1155,8 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
                     quiclysrc->prev_transit - transit : 
                     transit - quiclysrc->prev_transit;
 
+    if (tmp > 2 * quiclysrc->jitter)
+      g_print("big jitter: %lu\n", tmp);
     quiclysrc->jitter = (quiclysrc->num_packets * quiclysrc->jitter + tmp) / (quiclysrc->num_packets + 1);
     quiclysrc->prev_transit = transit;
   }

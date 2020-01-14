@@ -101,6 +101,8 @@ struct _GstQuiclysrc
   GstClockTime prev_arrival_time;
   GstClockTime prev_transit;
   guint64 jitter;
+  guint64 max_jitter;
+  guint num_jitter_spikes;
 };
 
 struct _GstQuiclysrcClass
