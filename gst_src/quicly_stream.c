@@ -269,7 +269,7 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
                 }
                 gst_structure_free(stats);
             }
-        }
+        } 
         #pragma GCC diagnostic push
         #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
         g_value_array_free(arr);
@@ -1202,7 +1202,7 @@ add_client_stream(GstElement *pipe, GstElement *rtpBin, SessionData *session, Ap
         rtpSrc = gst_element_factory_make("udpsrc", "rtpsrc");
         // timeout: 1550000000
         g_object_set(rtpSrc, "port", adata->port, "caps", 
-                        session->caps, "timeout", 1550000000, NULL);
+                        session->caps, "timeout", 300000000, NULL);
 
         /* Use a probe pad to recognize when we first receive a packet.
          * After the first packet is received, the timeout activates
@@ -1271,9 +1271,9 @@ static SessionData *make_client_video_session(guint sessionNum, AppData *cdata)
     if (cdata->headless) {
         sink = gst_element_factory_make("fpsdisplaysink", "sink");
         GstElement *internal_sink = gst_element_factory_make("fakesink", "internal_sink");
-        g_object_set(internal_sink, "sync", TRUE, "qos", TRUE, NULL);
+        g_object_set(internal_sink, "sync", FALSE, "qos", FALSE, NULL);
         g_object_set(sink, "signal-fps-measurements", TRUE, "video-sink", internal_sink, 
-                    "sync", TRUE, NULL);
+                    "sync", FALSE, NULL);
         g_signal_connect(sink, "fps-measurements", G_CALLBACK(cb_fps_measurement), NULL);
         cdata->elements.internal_sink = internal_sink;
     } else if (cdata->saveToFilePath != NULL) {
@@ -1443,7 +1443,7 @@ int run_client(AppData *cdata)
     
     rtpBin = gst_element_factory_make("rtpbin", "rtpbin");
     gst_bin_add(GST_BIN(pipe), rtpBin);
-    g_object_set (rtpBin, "latency", 200, "do-retransmission", cdata->aux,
+    g_object_set (rtpBin, "latency", 100, "do-retransmission", cdata->aux,
       "rtp-profile", GST_RTP_PROFILE_AVPF, NULL);
 
     g_signal_connect(rtpBin, "new-jitterbuffer", G_CALLBACK(cb_new_jitterbuf), cdata);
