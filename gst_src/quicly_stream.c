@@ -315,19 +315,25 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
             gst_structure_get_uint(stats, "jitter-spikes", &jit_spikes);
             gst_structure_free(stats);
             pthread_mutex_lock(&lock_fps);
-            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%u,%lu%.2f,%.2f\n", 
-                    time, packets_sent-data->stats.packets_sent, 
+            fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%u,%lu,%.2f,%.2f\n", 
+                    time, 
+                    packets_sent-data->stats.packets_sent, 
                     packets_lost-data->stats.packets_lost, 
                     packets_received-data->stats.packets_received, 
                     bytes_sent-data->stats.bytes_sent,
                     bytes_received-data->stats.bytes_received, 
                     bytes_received_quic_payload-data->stats.rtcp_bytes_sent,
                     bytes_received_rtp_payload-data->stats.bytes_received_rtp_payload,
-                    pushed-data->stats.jitbuf_pushed, rtp_lost-data->stats.jitbuf_lost, 
-                    late-data->stats.jitbuf_late, jitbuf_jitter, rtpsrc_jitter, 
-                    jitter, jit_spikes-data->stats.num_jit_spikes,
+                    pushed-data->stats.jitbuf_pushed, 
+                    rtp_lost-data->stats.jitbuf_lost, 
+                    late-data->stats.jitbuf_late, 
+                    jitbuf_jitter, 
+                    rtpsrc_jitter, 
+                    jitter, 
+                    jit_spikes-data->stats.num_jit_spikes,
                     bitrate/1000,
-                    avg_fps_g, fps_g);
+                    avg_fps_g, 
+                    fps_g);
             pthread_mutex_unlock(&lock_fps);
             data->stats.num_jit_spikes = jit_spikes;
             data->stats.rtcp_bytes_sent = bytes_received_quic_payload;
@@ -1677,7 +1683,7 @@ int main (int argc, char *argv[])
                                                  "jitter-spikes, rtpsrc-bitrate(kbit/s), avg-fps, fps\n");
             }
         }
-        g_free(logfile);
+        g_free(logfile);                   
     }
     /* handle different modes */
     if (data.scream) {
