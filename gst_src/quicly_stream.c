@@ -992,7 +992,7 @@ static SessionData *make_server_video_session(guint sessionNum, AppData *sdata)
         return NULL;
     }
 
-    g_object_set(identity, "sync", FALSE, NULL);
+    g_object_set(identity, "sync", TRUE, NULL);
     g_object_set(G_OBJECT(filesrc), "location", sdata->file_path, NULL);
     if (sdata->rtp_mtu > 1252)
         sdata->rtp_mtu = 1252;
@@ -1215,7 +1215,7 @@ add_client_stream(GstElement *pipe, GstElement *rtpBin, SessionData *session, Ap
         rtpSrc = gst_element_factory_make("udpsrc", "rtpsrc");
         // timeout: 1550000000
         g_object_set(rtpSrc, "port", adata->port, "caps", 
-                        session->caps, "timeout", 300000000, NULL);
+                        session->caps, "timeout", 1550000000, NULL);
 
         /* Use a probe pad to recognize when we first receive a packet.
          * After the first packet is received, the timeout activates
