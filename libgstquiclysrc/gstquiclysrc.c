@@ -1018,7 +1018,8 @@ static int on_receive_dgram(quicly_dgram_t *dgram, const void *src, size_t len)
     guint64 tmp = quiclysrc->prev_transit > transit ? 
                     quiclysrc->prev_transit - transit : 
                     transit - quiclysrc->prev_transit;
-    quiclysrc->jitter = quiclysrc->jitter + tmp - quiclysrc->jitter / 16;
+
+    quiclysrc->jitter = (quiclysrc->num_packets * quiclysrc->jitter + tmp) / (quiclysrc->num_packets + 1);
     quiclysrc->prev_transit = transit;
   }
   quiclysrc->prev_arrival_time = now;
@@ -1142,16 +1143,17 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
     }
 
     /* calc jitter */
-    GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
-    if (quiclysrc->prev_arrival_time != 0) {
-      guint64 transit = now - quiclysrc->prev_arrival_time;
-      guint64 tmp = quiclysrc->prev_transit > transit ? 
-                      quiclysrc->prev_transit - transit : 
-                      transit - quiclysrc->prev_transit;
-      quiclysrc->jitter = quiclysrc->jitter + tmp - quiclysrc->jitter / 16;
-      quiclysrc->prev_transit = transit;
-    }
-    quiclysrc->prev_arrival_time = now;
+  GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
+  if (quiclysrc->prev_arrival_time != 0) {
+    guint64 transit = now - quiclysrc->prev_arrival_time;
+    guint64 tmp = quiclysrc->prev_transit > transit ? 
+                    quiclysrc->prev_transit - transit : 
+                    transit - quiclysrc->prev_transit;
+
+    quiclysrc->jitter = (quiclysrc->num_packets * quiclysrc->jitter + tmp) / (quiclysrc->num_packets + 1);
+    quiclysrc->prev_transit = transit;
+  }
+  quiclysrc->prev_arrival_time = now;
 
     if (quiclysrc->pushed >= quiclysrc->mem_list_size) {
       /* skip, buffer list full */

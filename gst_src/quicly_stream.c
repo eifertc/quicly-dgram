@@ -34,9 +34,10 @@ gdouble fps_g = 0.0;
 gdouble frame_drop_rate = 0.0;
 
 /* udp jitter */
-GstClockTime prev_arrival_time;
-GstClockTime prev_transit;
-guint64 jitter;
+GstClockTime prev_arrival_time = 0;
+GstClockTime prev_transit = 0;
+guint64 jitter = 0;
+guint udp_num_packets = 0;
 
 typedef struct {
     uint8_t ver_p_x_cc;
@@ -544,14 +545,15 @@ static GstPadProbeReturn cb_udp_first_packet(GstPad *pad, GstPadProbeInfo *info,
     /* calc jitter */
     GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
     if (prev_arrival_time != 0) {
-      guint64 transit = now - prev_arrival_time;
-      guint64 tmp = prev_transit > transit ? 
+      guint32 transit = now - prev_arrival_time;
+      guint32 tmp = prev_transit > transit ? 
                       prev_transit - transit : 
                       transit - prev_transit;
-      jitter = jitter + tmp - jitter / 16;
+      jitter = (udp_num_packets * jitter + tmp) / (udp_num_packets + 1);
       prev_transit = transit;
     }
     prev_arrival_time = now;
+    udp_num_packets++;
 
     //return GST_PAD_PROBE_REMOVE;
     return GST_PAD_PROBE_OK;
@@ -1399,6 +1401,7 @@ void print_client_stats(AppData *cdata)
         g_value_array_free(arr);
         #pragma GCC diagnostic pop
     }
+    g_print("SRC AVERAGE JITTER: %lu\n", jitter);
 
     if(!cdata->udp) {
         g_object_get(gst_bin_get_by_name(GST_BIN(cdata->elements.pipeline), "rtpsrc"), "stats", &stats, NULL);
