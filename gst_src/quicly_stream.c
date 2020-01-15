@@ -186,7 +186,7 @@ gboolean cb_print_stats(GstClock *cl, GstClockTime t, GstClockID id, gpointer us
 
             fprintf(data->stat_file_path, "%.3f,%lu,%lu,%lu,%lu", time, 
                             packets_sent-data->stats.packets_sent, 
-                            bytes_sent-data->stats.packets_sent,
+                            bytes_sent-data->stats.bytes_sent,
                             rtcp_packets_sent-data->stats.rtcp_packets_sent,
                             rtcp_bytes_sent-data->stats.rtcp_bytes_sent);
             data->stats.rtcp_packets_sent = rtcp_packets_sent;

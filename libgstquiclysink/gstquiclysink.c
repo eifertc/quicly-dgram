@@ -969,6 +969,7 @@ static int send_pending(GstQuiclysink *quiclysink, guint num)
   int ret;
   GError *err = NULL;
   gssize all = 0;
+  gboolean one_retry = TRUE;
 
   do {
       num_packets = sizeof(packets) / sizeof(packets[0]);
@@ -997,6 +998,12 @@ static int send_pending(GstQuiclysink *quiclysink, guint num)
         g_printerr("Send returned %i.\n", ret);
       }
 
+    if (num_packets == 0) {
+      if (one_retry)
+        one_retry = FALSE;
+      else
+        break;
+    }
   } while ((ret == 0) && 
     (quicly_dgram_can_send(quiclysink->dgram) || 
     quiclysink->ctx.stream_scheduler->can_send(quiclysink->ctx.stream_scheduler, quiclysink->conn, 0)));
@@ -1203,10 +1210,7 @@ gboolean gst_quiclysink_set_clock(GstElement *element, GstClock *clock)
 static void send_remaining_before_close(GstQuiclysink *quiclysink)
 {
   GST_DEBUG_OBJECT(quiclysink, "Sending final packets\n");
-  while(quicly_dgram_can_send(quiclysink->dgram)) {
-    if (send_pending(quiclysink, DEFAULT_SEND_BUFFER) != 0)
-      break;
-  }
+  send_pending(quiclysink, DEFAULT_SEND_BUFFER);
 }
 
 static gboolean gst_quiclysink_event (GstBaseSink * sink, GstEvent * event)

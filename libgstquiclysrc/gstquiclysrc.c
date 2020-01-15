@@ -1147,20 +1147,20 @@ static int on_receive_stream(quicly_stream_t *stream, size_t off, const void *sr
       return 0;
     }
 
-    /* calc jitter */
-  GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
-  if (quiclysrc->prev_arrival_time != 0) {
-    guint64 transit = now - quiclysrc->prev_arrival_time;
-    guint64 tmp = quiclysrc->prev_transit > transit ? 
-                    quiclysrc->prev_transit - transit : 
-                    transit - quiclysrc->prev_transit;
+     /* calc jitter */
+    GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
+    if (quiclysrc->prev_arrival_time != 0) {
+      guint64 transit = now - quiclysrc->prev_arrival_time;
+      guint64 tmp = quiclysrc->prev_transit > transit ? 
+                      quiclysrc->prev_transit - transit : 
+                      transit - quiclysrc->prev_transit;
 
-    if (tmp > 2 * quiclysrc->jitter)
-      g_print("big jitter: %lu\n", tmp);
-    quiclysrc->jitter = (quiclysrc->num_packets * quiclysrc->jitter + tmp) / (quiclysrc->num_packets + 1);
-    quiclysrc->prev_transit = transit;
-  }
-  quiclysrc->prev_arrival_time = now;
+      if (tmp > 2 * quiclysrc->jitter)
+        quiclysrc->num_jitter_spikes++;
+      quiclysrc->jitter = (quiclysrc->num_packets * quiclysrc->jitter + tmp) / (quiclysrc->num_packets + 1);
+      quiclysrc->prev_transit = transit;
+    }
+    quiclysrc->prev_arrival_time = now;
 
     if (quiclysrc->pushed >= quiclysrc->mem_list_size) {
       /* skip, buffer list full */
