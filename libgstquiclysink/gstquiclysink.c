@@ -104,7 +104,7 @@ static GstStructure *gst_quiclysink_create_stats(GstQuiclysink *quiclysink);
 
 static const char *session_file = NULL;
 
-/* POSSIBLY NOT NEEDED */
+/* Quicly features we don't really need */
 /*
 static struct {
     ptls_aead_context_t *enc, *dec;
@@ -351,14 +351,6 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->cid_key = malloc(sizeof(gchar) * 17);
   quiclysink->tlsctx.random_bytes(quiclysink->cid_key, sizeof(*quiclysink->cid_key) - 1);
 
-  // NEW. What is THAT?
-  /*
-  uint8_t secret[PTLS_MAX_DIGEST_SIZE];
-  quiclysink->tlsctx.random_bytes(secret, ptls_openssl_sha256.digest_size);
-  address_token_aead.enc = ptls_aead_new(&ptls_openssl_aes128gcm, &ptls_openssl_sha256, 1, secret, "");
-  address_token_aead.dec = ptls_aead_new(&ptls_openssl_aes128gcm, &ptls_openssl_sha256, 0, secret, "");
-  */
-
   quiclysink->ctx.cid_encryptor = quicly_new_default_cid_encryptor(
                                   &ptls_openssl_bfecb, &ptls_openssl_aes128ecb, &ptls_openssl_sha256,
                                   ptls_iovec_init(quiclysink->cid_key,
@@ -367,7 +359,6 @@ gst_quiclysink_init (GstQuiclysink *quiclysink)
   quiclysink->conn = NULL;
   quiclysink->conn_addr = NULL;
   quiclysink->dgram = NULL;
-  quiclysink->fb_timeout = quiclysink->ctx.now->cb(quiclysink->ctx.now);
   /* -------- end context init --------------*/
 
   quiclysink->recv_buf = malloc(sizeof(gchar) * (2048 + 1));
@@ -559,7 +550,6 @@ gst_quiclysink_start (GstBaseSink * sink)
   GError *err = NULL;
   GInetAddress *iaddr;
 
-  /* from multisink:gst_udp_client_new */
   iaddr = g_inet_address_new_from_string(quiclysink->bind_iaddr);
   if (!iaddr) {
     g_printerr("Could not resolve host address\n");
@@ -581,7 +571,6 @@ gst_quiclysink_start (GstBaseSink * sink)
     return FALSE;
   }
 
-  //GIOCondition con;
   int64_t timeout_at;
   int64_t delta;
   int64_t wait = 0;
@@ -711,7 +700,6 @@ gst_quiclysink_stop (GstBaseSink * sink)
  */
 gboolean emit_feedback_signal_cb(GstClock *clock, GstClockTime t, GstClockID id, gpointer data)
 {
-  //quiclysink->fb_timeout = quiclysink->ctx.now->cb(quiclysink->ctx.now);
   GstQuiclysink *quiclysink = GST_QUICLYSINK(data);
 
   GST_OBJECT_LOCK(quiclysink);
@@ -740,55 +728,8 @@ gst_quiclysink_render (GstBaseSink * sink, GstBuffer * buffer)
   GstMapInfo map;
   int ret;
 
-  /*
-  if (buffer->pts != GST_CLOCK_TIME_NONE) {
-    g_print("PTS: %.3f\n", buffer->pts / 1e9f);
-    if (quiclysink->pipeline_clock != NULL)
-      g_print("Clock: %.3f\n", (gst_clock_get_time(quiclysink->pipeline_clock)
-                                 - GST_ELEMENT(quiclysink)->base_time) / 1e9f);
-  }
-  */
-  /*
-  if (buffer->pts != GST_CLOCK_TIME_NONE) {
-    g_print("TimeNow: %.3f\n", quiclysink->ctx.now->cb(quiclysink->ctx.now) - GST_ELEMENT(quiclysink)->base_time / 1e6f);
-    g_print("TimeClock: %.3f\n", (gst_clock_get_time(quiclysink->pipeline_clock)
-                                 - GST_ELEMENT(quiclysink)->base_time) / 1e9f);
-  }
-  */
-  /*
-  if (buffer->pts != GST_CLOCK_TIME_NONE) {
-    gint64 diff = buffer->pts - quiclysink->previousPts;
-    g_print("diff: %lu\n", diff);
-    quiclysink->previousPts = buffer->pts;
-  }
-  */
-  /* Trying to get the buffer duration */
-  /*
-  GstClockTime duration = GST_BUFFER_DURATION(buffer);
-  if (GST_CLOCK_TIME_IS_VALID(duration))
-    g_print("DURATION: %lu\n", duration);
-
-  GstSegment *segment = &sink->segment;
-  GstFormat format = segment->format;
-  guint64 rstart, rstop;
-  g_print("PTS: %.3f\n", GST_BUFFER_PTS(buffer) / 1e9f);
-  rstart = gst_segment_to_running_time(segment, format, GST_BUFFER_PTS(buffer));
-  g_print("Running_time: %.3f\n", rstart / 1e9f);
-  rstart = gst_segment_to_stream_time(segment, format, GST_BUFFER_PTS(buffer));
-  g_print("stream_time: %.3f\n", rstart / 1e9f);
-  */
-
   gst_buffer_map(buffer, &map, GST_MAP_READ);
 
-  /*
-  if (buffer->pts != GST_CLOCK_TIME_NONE) {
-    rtp_hdr *hdr = (rtp_hdr *) map.data;
-    uint32_t time_rtp = hdr->timestamp;
-    g_print("TimeClock: %.3f\n", (gst_clock_get_time(quiclysink->pipeline_clock)
-                                 - GST_ELEMENT(quiclysink)->base_time) / 1e9f);
-    g_print("rtp: %.3f\n", time_rtp / 1e9f);
-  }
-  */
   /* write buffer to quicly dgram buffer */
   if (!quiclysink->stream_mode){
     /* Check if payload size fits in one quicly datagram frame */
@@ -865,6 +806,9 @@ gst_quiclysink_render_list (GstBaseSink * sink, GstBufferList * buffer_list)
   return flow;
 }
 
+/*
+ * Receive ACKs async
+ */
 gboolean receive_async_cb(GstClock *clock, GstClockTime t, GstClockID id, gpointer data)
 {
   GstQuiclysink *quiclysink = GST_QUICLYSINK(data);
@@ -904,8 +848,7 @@ static int receive_packet(GstQuiclysink *quiclysink)
   gssize len = g_socket_address_get_native_size(in_addr);
   if (!g_socket_address_to_native(in_addr, &native_sa, len, &err)) {
     g_printerr("Could not convert GSocketAddress to native. Error: %s\n", err->message);
-    g_object_unref(in_addr);
-    return -1;
+    goto error;
   }
   while (off != rret) {
     quicly_decoded_packet_t packet;
@@ -927,32 +870,35 @@ static int receive_packet(GstQuiclysink *quiclysink)
                           &quiclysink->next_cid, NULL) == 0) {
         if (quiclysink->conn == NULL) {
           g_printerr("Quicly accept returned success but conn is NULL\n");
-          g_object_unref(in_addr);
-          return -1;
+          goto error;
         }
         quiclysink->conn_addr = in_addr;
         ++quiclysink->next_cid.master_id;
       } else {
         if (quiclysink->conn == NULL) {
           g_printerr("Failed to accept connection\n");
-          g_object_unref(in_addr);
-          return -1;
+          goto error;
         }
       }
     } else {
       g_print("Server: received short header packet but conn == NULL\n");
-      g_object_unref(in_addr);
-      return -1;
+      goto error;
     }
     off += plen;
   }
   g_object_unref(in_addr);
   return 0;
+
+  error:
+    {
+      g_object_unref(in_addr);
+      return -1;
+    }
 }
 
 /* 
  * write packet to send buffer.
- * Set max_time to 0 to ignore.
+ * Set max_time to -1 to disable dropping.
  */
 static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t len, gint64 max_time) 
 {
@@ -961,6 +907,10 @@ static void write_dgram_buffer(quicly_dgram_t *dgram, const void *src, size_t le
     g_printerr("quicly_dgrambuf_egress_write returns: %i\n", ret);
 }
 
+/*
+ * Send all committed buffers as fast as possible
+ * Does not return until everythin is sent
+ */
 static int send_pending(GstQuiclysink *quiclysink, guint num)
 {
   quicly_datagram_t *packets[num];
@@ -969,7 +919,6 @@ static int send_pending(GstQuiclysink *quiclysink, guint num)
   int ret;
   GError *err = NULL;
   gssize all = 0;
-  gboolean one_retry = TRUE;
 
   do {
       num_packets = sizeof(packets) / sizeof(packets[0]);
@@ -998,12 +947,6 @@ static int send_pending(GstQuiclysink *quiclysink, guint num)
         g_printerr("Send returned %i.\n", ret);
       }
 
-    if (num_packets == 0) {
-      if (one_retry)
-        one_retry = FALSE;
-      else
-        break;
-    }
   } while ((ret == 0) && 
     (quicly_dgram_can_send(quiclysink->dgram) || 
     quiclysink->ctx.stream_scheduler->can_send(quiclysink->ctx.stream_scheduler, quiclysink->conn, 0)));
@@ -1131,7 +1074,6 @@ static int on_receive_reset(quicly_stream_t *stream, int err)
 /* Negotiate features on client hello */
 static int on_client_hello_cb(ptls_on_client_hello_t *_self, ptls_t *tls, ptls_on_client_hello_parameters_t *params)
 {
-  //g_print("on_client_hello_cb. TODO\n");
   return 0;
 }
 

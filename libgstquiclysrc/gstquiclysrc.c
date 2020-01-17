@@ -204,19 +204,15 @@ gst_quiclysrc_class_init (GstQuiclysrcClass * klass)
   gobject_class->finalize = gst_quiclysrc_finalize;
 
   base_src_class->get_caps = GST_DEBUG_FUNCPTR (gst_quiclysrc_get_caps);
-  //base_src_class->decide_allocation = GST_DEBUG_FUNCPTR (gst_quiclysrc_decide_allocation);
+  base_src_class->decide_allocation = GST_DEBUG_FUNCPTR (gst_quiclysrc_decide_allocation);
   base_src_class->start = GST_DEBUG_FUNCPTR (gst_quiclysrc_start);
   base_src_class->stop = GST_DEBUG_FUNCPTR (gst_quiclysrc_stop);
-  base_src_class->decide_allocation = gst_quiclysrc_decide_allocation;
   base_src_class->unlock = GST_DEBUG_FUNCPTR (gst_quiclysrc_unlock);
   base_src_class->unlock_stop = GST_DEBUG_FUNCPTR (gst_quiclysrc_unlock_stop);
-  //push_src_class->fill = GST_DEBUG_FUNCPTR (gst_quiclysrc_fill);
 
   /* buffer list */
   push_src_class->create = GST_DEBUG_FUNCPTR (gst_quiclysrc_create);
   base_src_class->negotiate = GST_DEBUG_FUNCPTR (gst_quiclysrc_negotiate);
-
-  //gstelement_class->set_clock = GST_DEBUG_FUNCPTR(gst_quiclysrc_set_clock);
 
   g_object_class_install_property(gobject_class, PROP_HOST,
                                   g_param_spec_string("host", 
@@ -489,7 +485,9 @@ gst_quiclysrc_get_caps (GstBaseSrc * src, GstCaps * filter)
   return result;
 }
 
-/* start and stop processing, ideal for opening/closing the resource */
+/* start 
+ * Set up quic connection
+ */
 static gboolean
 gst_quiclysrc_start (GstBaseSrc * src)
 {
@@ -623,7 +621,7 @@ static int receive_packet(GstQuiclysrc *quiclysrc, GError *err)
     g_printerr("Error receiving from socket: %s\n", err->message);
     return -1;
   }
-  /* TODO: REMOVE THAT CONVERSION, best by using recvfrom directly instead of the g_socket variant? */
+  /* TODO: maybe use recvfrom directly instead of the g_socket variant? */
   gssize len = g_socket_address_get_native_size(in_addr);
   if (!g_socket_address_to_native(in_addr, &native_sa, len, &err)) {
     g_printerr("Could not convert GSocketAddress to native. Error: %s\n", err->message);

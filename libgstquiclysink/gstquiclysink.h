@@ -81,7 +81,6 @@ struct _GstQuiclysink
   gboolean stream_mode;
   gboolean multi_stream_mode;
 
-  gint64 fb_timeout; /* reference time for feedback signal emit */
   quicly_feedback_t feedback;
   quicly_stats_t stats;
 
